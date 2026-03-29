@@ -17,6 +17,7 @@ bl_info = {
 
 if bpy is not None:
     from .operators.run_task import VECTRA_OT_run_task, cleanup_request_state
+    from .tools.registry import get_default_registry
     from .ui.panel import VECTRA_PT_panel
 
     CLASSES = (
@@ -25,6 +26,7 @@ if bpy is not None:
     )
 
     def register() -> None:
+        get_default_registry().discover()
         for cls in CLASSES:
             bpy.utils.register_class(cls)
 

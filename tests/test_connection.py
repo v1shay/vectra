@@ -8,11 +8,31 @@ import pytest
 import uvicorn
 
 from agent_runtime.main import app
-from blender_addon.bridge.client import (
+from vectra.bridge.client import (
     BridgeConnectionError,
     create_task,
     health_check,
 )
+
+EXPECTED_ACTIONS = [
+    {
+        "action_id": "create_cube",
+        "tool": "mesh.create_primitive",
+        "params": {
+            "primitive_type": "cube",
+            "name": "VectraCube",
+            "location": [0.0, 0.0, 0.0],
+        },
+    },
+    {
+        "action_id": "move_cube",
+        "tool": "object.transform",
+        "params": {
+            "object_name": {"$ref": "create_cube.object_name"},
+            "location": [2.0, 0.0, 0.0],
+        },
+    },
+]
 
 
 def _find_free_port() -> int:
@@ -64,8 +84,8 @@ def test_bridge_client_talks_to_live_backend(live_server: str) -> None:
     assert health_check(base_url=live_server) == {"status": "ok"}
     assert create_task(payload, base_url=live_server) == {
         "status": "ok",
-        "message": "received",
-        "actions": [],
+        "message": "planned",
+        "actions": EXPECTED_ACTIONS,
     }
 
 

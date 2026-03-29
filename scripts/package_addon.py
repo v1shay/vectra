@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-SOURCE_DIR_NAME = "blender_addon"
+SOURCE_DIR_NAME = "vectra"
 ARCHIVE_ROOT_NAME = "vectra"
 OUTPUT_NAME = "vectra_addon.zip"
 

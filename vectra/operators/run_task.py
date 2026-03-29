@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import queue
 import threading
 from typing import Any
@@ -8,8 +7,10 @@ from typing import Any
 import bpy
 
 from ..bridge.client import BridgeClientError, create_task
+from ..execution.engine import ExecutionEngine
+from ..utils.logging import get_vectra_logger
 
-logger = logging.getLogger("vectra.blender")
+logger = get_vectra_logger("vectra.blender")
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 ALLOWED_PHASES = {"idle", "sending", "success", "error"}
@@ -18,6 +19,7 @@ _request_lock = threading.Lock()
 _request_thread: threading.Thread | None = None
 _request_queue: queue.Queue[tuple[str, Any]] | None = None
 _request_scene_name: str | None = None
+_execution_engine: ExecutionEngine | None = None
 
 
 def _set_phase(scene: bpy.types.Scene, phase: str) -> None:
@@ -36,6 +38,14 @@ def _scene_from_name(scene_name: str | None) -> bpy.types.Scene | None:
         if scene is not None:
             return scene
     return getattr(bpy.context, "scene", None)
+
+
+def _get_execution_engine() -> ExecutionEngine:
+    global _execution_engine
+
+    if _execution_engine is None:
+        _execution_engine = ExecutionEngine()
+    return _execution_engine
 
 
 def _worker(payload: dict[str, Any], base_url: str, result_queue: queue.Queue[tuple[str, Any]]) -> None:
@@ -75,8 +85,20 @@ def _poll_request_result() -> float | None:
     if scene is not None:
         scene.vectra_request_in_flight = False
         if result_type == "success":
-            _set_phase(scene, "success")
-            scene.vectra_status = str(payload.get("message", "received"))
+            actions = payload.get("actions", [])
+            if actions:
+                try:
+                    report = _get_execution_engine().run(bpy.context, actions)
+                except Exception:  # pragma: no cover - defensive safeguard for Blender runtime
+                    logger.exception("Unexpected Vectra execution failure")
+                    _set_phase(scene, "error")
+                    scene.vectra_status = "Execution failed"
+                else:
+                    _set_phase(scene, "success" if report.success else "error")
+                    scene.vectra_status = report.message
+            else:
+                _set_phase(scene, "success")
+                scene.vectra_status = str(payload.get("message", "planned"))
         else:
             _set_phase(scene, "error")
             scene.vectra_status = "Connection failed"
@@ -86,9 +108,10 @@ def _poll_request_result() -> float | None:
 
 
 def cleanup_request_state() -> None:
-    global _request_queue
+    global _execution_engine, _request_queue
 
     _request_queue = None
+    _execution_engine = None
     if _is_poll_timer_registered():
         bpy.app.timers.unregister(_poll_request_result)
     _finalize_request()
