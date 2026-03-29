@@ -22,6 +22,35 @@ _request_scene_name: str | None = None
 _execution_engine: ExecutionEngine | None = None
 
 
+def _vector_to_list(vector: Any) -> list[float]:
+    return [float(component) for component in vector[:3]]
+
+
+def _build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
+    scene = context.scene
+    active_object = context.active_object
+    objects = []
+    for obj in scene.objects:
+        objects.append(
+            {
+                "name": obj.name,
+                "type": obj.type,
+                "selected": bool(obj.select_get()),
+                "active": active_object is not None and obj == active_object,
+                "location": _vector_to_list(obj.location),
+                "rotation_euler": _vector_to_list(obj.rotation_euler),
+                "scale": _vector_to_list(obj.scale),
+            }
+        )
+
+    return {
+        "active_object": active_object.name if active_object else None,
+        "selected_objects": [obj.name for obj in context.selected_objects],
+        "current_frame": scene.frame_current,
+        "objects": objects,
+    }
+
+
 def _set_phase(scene: bpy.types.Scene, phase: str) -> None:
     if phase not in ALLOWED_PHASES:
         raise ValueError(f"Unsupported Vectra phase: {phase}")
@@ -163,11 +192,7 @@ class VECTRA_OT_run_task(bpy.types.Operator):
 
             payload = {
                 "prompt": scene.vectra_prompt,
-                "scene_state": {
-                    "active_object": context.active_object.name if context.active_object else None,
-                    "selected_objects": [obj.name for obj in context.selected_objects],
-                    "current_frame": scene.frame_current,
-                },
+                "scene_state": _build_scene_state(context),
                 "images": [],
             }
 

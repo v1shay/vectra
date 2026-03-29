@@ -2,29 +2,11 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from agent_runtime.main import app
+import agent_runtime.main as runtime_main
+from agent_runtime.planner import PlannerResult
+from tests.action_fixtures import CREATE_CUBE_ACTIONS
 
-client = TestClient(app)
-
-EXPECTED_ACTIONS = [
-    {
-        "action_id": "create_cube",
-        "tool": "mesh.create_primitive",
-        "params": {
-            "primitive_type": "cube",
-            "name": "VectraCube",
-            "location": [0.0, 0.0, 0.0],
-        },
-    },
-    {
-        "action_id": "move_cube",
-        "tool": "object.transform",
-        "params": {
-            "object_name": {"$ref": "create_cube.object_name"},
-            "location": [2.0, 0.0, 0.0],
-        },
-    },
-]
+client = TestClient(runtime_main.app)
 
 
 def test_health_returns_ok() -> None:
@@ -34,7 +16,15 @@ def test_health_returns_ok() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_create_task_returns_stub_response() -> None:
+def test_create_task_returns_planner_response(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runtime_main,
+        "plan",
+        lambda prompt, scene_state: PlannerResult(
+            actions=CREATE_CUBE_ACTIONS,
+            message=f"planned for {prompt}:{scene_state.get('current_frame', 'missing')}",
+        ),
+    )
     payload = {
         "prompt": "Create a chair",
         "scene_state": {
@@ -50,12 +40,20 @@ def test_create_task_returns_stub_response() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "message": "planned",
-        "actions": EXPECTED_ACTIONS,
+        "message": "planned for Create a chair:1",
+        "actions": CREATE_CUBE_ACTIONS,
     }
 
 
-def test_create_task_is_deterministic_for_identical_input() -> None:
+def test_create_task_is_deterministic_for_identical_input(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runtime_main,
+        "plan",
+        lambda prompt, scene_state: PlannerResult(
+            actions=CREATE_CUBE_ACTIONS,
+            message=f"planned for {prompt}:{scene_state.get('current_frame', 'missing')}",
+        ),
+    )
     payload = {
         "prompt": "Make it blue",
         "scene_state": {
@@ -73,12 +71,20 @@ def test_create_task_is_deterministic_for_identical_input() -> None:
     assert second.status_code == 200
     assert first.json() == second.json() == {
         "status": "ok",
-        "message": "planned",
-        "actions": EXPECTED_ACTIONS,
+        "message": "planned for Make it blue:24",
+        "actions": CREATE_CUBE_ACTIONS,
     }
 
 
-def test_create_task_action_schema_is_structured() -> None:
+def test_create_task_action_schema_is_structured(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runtime_main,
+        "plan",
+        lambda prompt, scene_state: PlannerResult(
+            actions=CREATE_CUBE_ACTIONS,
+            message=f"planned for {prompt}:{len(scene_state)}",
+        ),
+    )
     response = client.post(
         "/task/create",
         json={
@@ -93,4 +99,4 @@ def test_create_task_action_schema_is_structured() -> None:
     assert isinstance(payload["actions"], list)
     assert payload["actions"][0]["action_id"] == "create_cube"
     assert payload["actions"][0]["tool"] == "mesh.create_primitive"
-    assert payload["actions"][1]["params"]["object_name"] == {"$ref": "create_cube.object_name"}
+    assert payload["actions"][0]["params"]["name"] == "VectraCube"

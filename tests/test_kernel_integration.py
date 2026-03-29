@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 
 from fastapi.testclient import TestClient
 
-from agent_runtime.main import app
+import agent_runtime.main as runtime_main
+from agent_runtime.planner import PlannerResult
 from vectra.execution.engine import ExecutionEngine
 from vectra.tools.base import BaseTool, ToolExecutionResult, ToolValidationError
 from vectra.tools.registry import ToolRegistry
@@ -62,6 +63,27 @@ class FailingTransformTool(KernelTransformTool):
         raise ToolValidationError("Transform execution failed")
 
 
+KERNEL_ACTIONS = [
+    {
+        "action_id": "create_cube",
+        "tool": "mesh.create_primitive",
+        "params": {
+            "primitive_type": "cube",
+            "name": "VectraCube",
+            "location": [0.0, 0.0, 0.0],
+        },
+    },
+    {
+        "action_id": "move_cube",
+        "tool": "object.transform",
+        "params": {
+            "object_name": {"$ref": "create_cube.object_name"},
+            "location": [2.0, 0.0, 0.0],
+        },
+    },
+]
+
+
 def _make_engine(*tool_classes: type[BaseTool]) -> ExecutionEngine:
     registry = ToolRegistry()
     for tool_cls in tool_classes:
@@ -69,8 +91,16 @@ def _make_engine(*tool_classes: type[BaseTool]) -> ExecutionEngine:
     return ExecutionEngine(registry=registry, logger=get_vectra_logger("vectra.tests.kernel"))
 
 
-def _create_payload() -> dict[str, object]:
-    client = TestClient(app)
+def _create_payload(monkeypatch) -> dict[str, object]:
+    monkeypatch.setattr(
+        runtime_main,
+        "plan",
+        lambda prompt, scene_state: PlannerResult(
+            actions=KERNEL_ACTIONS,
+            message=f"planned for {prompt}:{scene_state.get('current_frame', 'missing')}",
+        ),
+    )
+    client = TestClient(runtime_main.app)
     response = client.post(
         "/task/create",
         json={
@@ -87,15 +117,15 @@ def _create_payload() -> dict[str, object]:
     return response.json()
 
 
-def test_kernel_integration_create_then_transform_sequence_executes() -> None:
+def test_kernel_integration_create_then_transform_sequence_executes(monkeypatch) -> None:
     engine = _make_engine(KernelCreatePrimitiveTool, KernelTransformTool)
     context = KernelContext()
-    payload = _create_payload()
+    payload = _create_payload(monkeypatch)
 
     report = engine.run(context, payload["actions"])
 
     assert payload["status"] == "ok"
-    assert payload["message"] == "planned"
+    assert payload["message"] == "planned for kernel integration test:1"
     assert report.success is True
     assert report.message == "Executed 2 action(s) successfully"
     assert context.created_objects == ["VectraCube"]
@@ -104,10 +134,10 @@ def test_kernel_integration_create_then_transform_sequence_executes() -> None:
     ]
 
 
-def test_kernel_integration_failure_returns_structured_error() -> None:
+def test_kernel_integration_failure_returns_structured_error(monkeypatch) -> None:
     engine = _make_engine(KernelCreatePrimitiveTool, FailingTransformTool)
     context = KernelContext()
-    payload = _create_payload()
+    payload = _create_payload(monkeypatch)
 
     report = engine.run(context, payload["actions"])
 

@@ -26,6 +26,7 @@ class BaseTool(ABC):
     name: str = ""
     description: str = ""
     input_schema: dict[str, Any] = {}
+    output_schema: dict[str, Any] = {}
 
     def validate_params(self, params: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(params, dict):

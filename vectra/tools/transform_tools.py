@@ -22,6 +22,9 @@ class TransformObjectTool(BaseTool):
         "rotation_euler": {"type": "vector3", "required": False},
         "scale": {"type": "vector3", "required": False},
     }
+    output_schema = {
+        "object_name": {"type": "string"},
+    }
 
     def validate_params(self, params: dict[str, Any]) -> dict[str, Any]:
         params = super().validate_params(params)
