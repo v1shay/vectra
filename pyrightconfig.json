@@ -1,0 +1,20 @@
+{
+  "include": [
+    "agent_runtime",
+    "vectra",
+    "tests",
+    "scripts"
+  ],
+  "stubPath": "typings",
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportMissingModuleSource": "none",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "."
+      ]
+    }
+  ]
+}

@@ -28,6 +28,13 @@ def _set_phase(scene: bpy.types.Scene, phase: str) -> None:
     scene.vectra_phase = phase
 
 
+def _apply_ui_state(scene: bpy.types.Scene, *, status: str, phase: str) -> None:
+    print("VECTRA DEBUG: setting status =", status)
+    print("VECTRA DEBUG: setting phase =", phase)
+    _set_phase(scene, phase)
+    scene.vectra_status = status
+
+
 def _is_poll_timer_registered() -> bool:
     return bpy.app.timers.is_registered(_poll_request_result)
 
@@ -85,23 +92,40 @@ def _poll_request_result() -> float | None:
     if scene is not None:
         scene.vectra_request_in_flight = False
         if result_type == "success":
+            response = payload
+            print("VECTRA DEBUG: backend response =", response)
             actions = payload.get("actions", [])
+            print("VECTRA DEBUG: actions =", actions)
+            print("VECTRA DEBUG: actions type =", type(actions).__name__)
             if actions:
                 try:
+                    print("VECTRA DEBUG: about to run execution engine")
                     report = _get_execution_engine().run(bpy.context, actions)
+                    print("VECTRA DEBUG: execution report =", report)
                 except Exception:  # pragma: no cover - defensive safeguard for Blender runtime
                     logger.exception("Unexpected Vectra execution failure")
-                    _set_phase(scene, "error")
-                    scene.vectra_status = "Execution failed"
+                    _apply_ui_state(scene, status="Execution failed", phase="error")
                 else:
-                    _set_phase(scene, "success" if report.success else "error")
-                    scene.vectra_status = report.message
+                    if report.success:
+                        _apply_ui_state(
+                            scene,
+                            status=f"Executed {len(report.results)} action(s) successfully",
+                            phase="success",
+                        )
+                    else:
+                        _apply_ui_state(
+                            scene,
+                            status=f"Failed at {report.failed_action_id or 'unknown'}",
+                            phase="error",
+                        )
             else:
-                _set_phase(scene, "success")
-                scene.vectra_status = str(payload.get("message", "planned"))
+                _apply_ui_state(
+                    scene,
+                    status=f"No actions returned: {payload.get('message', 'No actions returned')}",
+                    phase="success",
+                )
         else:
-            _set_phase(scene, "error")
-            scene.vectra_status = "Connection failed"
+            _apply_ui_state(scene, status="Connection failed", phase="error")
 
     _finalize_request()
     return None
