@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import TaskCreateResponse
+try:
+    from .models import TaskCreateResponse
+except ImportError:  # pragma: no cover - supports local module imports from agent_runtime/
+    from models import TaskCreateResponse
 
 
 def build_task_response(

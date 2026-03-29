@@ -4,8 +4,12 @@ import logging
 
 from fastapi import FastAPI
 
-from .models import HealthResponse, TaskCreateRequest, TaskCreateResponse
-from .planner_stub import build_task_response
+try:
+    from .models import HealthResponse, TaskCreateRequest, TaskCreateResponse
+    from .planner_stub import build_task_response
+except ImportError:  # pragma: no cover - supports `uvicorn main:app` from agent_runtime/
+    from models import HealthResponse, TaskCreateRequest, TaskCreateResponse
+    from planner_stub import build_task_response
 
 logger = logging.getLogger("vectra.runtime")
 
