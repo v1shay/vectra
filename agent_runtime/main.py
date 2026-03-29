@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -11,10 +12,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 try:
-    from .models import HealthResponse, TaskCreateRequest, TaskCreateResponse
+    from .models import ActionModel, HealthResponse, TaskCreateRequest, TaskCreateResponse
     from .planner import plan
 except ImportError:  # pragma: no cover - supports `uvicorn main:app` from agent_runtime/
-    from models import HealthResponse, TaskCreateRequest, TaskCreateResponse
+    from models import ActionModel, HealthResponse, TaskCreateRequest, TaskCreateResponse
     from planner import plan
 
 logger = logging.getLogger("vectra.runtime")
@@ -26,6 +27,10 @@ def _model_to_dict(model: object) -> dict:
     if hasattr(model, "model_dump"):
         return model.model_dump()  # type: ignore[no-any-return]
     return model.dict()  # type: ignore[attr-defined,no-any-return]
+
+
+def _build_action_models(actions: list[dict[str, Any]]) -> list[ActionModel]:
+    return [ActionModel.model_validate(action) for action in actions]
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -43,5 +48,5 @@ def create_task(request: TaskCreateRequest) -> TaskCreateResponse:
     return TaskCreateResponse(
         status="ok",
         message=planner_result.message,
-        actions=planner_result.actions,
+        actions=_build_action_models(planner_result.actions),
     )
