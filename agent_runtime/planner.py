@@ -27,7 +27,9 @@ def _get_registry() -> ToolRegistry:
     return registry
 
 
-def _validate_param_value(value: Any, *, tool_name: str, path: str) -> None:
+def _validate_param_structure(value: Any, *, tool_name: str, path: str) -> None:
+    # Planner validation stays structural on purpose. The execution layer remains the
+    # source of truth for full tool param validation and defaults.
     if isinstance(value, Mapping):
         if set(value.keys()) == {"$ref"}:
             raw_ref = value["$ref"]
@@ -43,7 +45,7 @@ def _validate_param_value(value: Any, *, tool_name: str, path: str) -> None:
             return
 
         for nested_key, nested_value in value.items():
-            _validate_param_value(
+            _validate_param_structure(
                 nested_value,
                 tool_name=tool_name,
                 path=f"{path}.{nested_key}",
@@ -52,7 +54,7 @@ def _validate_param_value(value: Any, *, tool_name: str, path: str) -> None:
 
     if isinstance(value, list):
         for index, item in enumerate(value):
-            _validate_param_value(
+            _validate_param_structure(
                 item,
                 tool_name=tool_name,
                 path=f"{path}[{index}]",
@@ -97,7 +99,7 @@ def _validate_actions(actions: list[dict[str, Any]], registry: ToolRegistry) -> 
                 raise PlannerValidationError(f"Duplicate action_id '{action_id}'")
             seen_action_ids.add(action_id)
 
-        _validate_param_value(params, tool_name=tool_name, path="params")
+        _validate_param_structure(params, tool_name=tool_name, path="params")
 
         validated_action = {
             "tool": tool_name,

@@ -178,10 +178,174 @@ def _tool_metadata() -> list[dict[str, Any]]:
     return metadata
 
 
+def _format_tool_catalog() -> str:
+    lines: list[str] = []
+    for tool in _tool_metadata():
+        lines.extend(
+            [
+                f"Tool: {tool['name']}",
+                f"- Meaning: {tool['description']}",
+                f"- Input schema: {json.dumps(tool['input_schema'], sort_keys=True)}",
+                f"- Output schema: {json.dumps(tool['output_schema'], sort_keys=True)}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _format_examples() -> str:
+    examples = [
+        {
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "move cube to x 10",
+            "output": [
+                {
+                    "action_id": "move_cube",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "location": [10, 0, 0],
+                    },
+                }
+            ],
+            "why": "Use the existing Cube and update only the x coordinate while keeping the other coordinates from the current scene state.",
+        },
+        {
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [3, 1, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "shift the cube right",
+            "output": [
+                {
+                    "action_id": "shift_cube",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "location": [5, 1, 0],
+                    },
+                }
+            ],
+            "why": "Right means a positive x move. When no distance is given, use a default relative step of 2 units and preserve y and z.",
+        },
+        {
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "put the cube at position 10 on x axis",
+            "output": [
+                {
+                    "action_id": "place_cube",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "location": [10, 0, 0],
+                    },
+                }
+            ],
+            "why": "An absolute x-axis instruction becomes a full location vector that keeps the current y and z values.",
+        },
+        {
+            "scene": {
+                "active_object": "Sphere",
+                "selected_objects": ["Sphere"],
+                "objects": [
+                    {
+                        "name": "Sphere",
+                        "location": [1, 2, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "slide it over",
+            "output": [
+                {
+                    "action_id": "slide_active_object",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Sphere",
+                        "location": [3, 2, 0],
+                    },
+                }
+            ],
+            "why": "Resolve 'it' to the active object, then apply a relative move using the current coordinates from scene state.",
+        },
+        {
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "put cube at 5 0 0",
+            "output": [
+                {
+                    "action_id": "put_cube",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "location": [5, 0, 0],
+                    },
+                }
+            ],
+            "why": "A three-number position request becomes a full absolute location vector.",
+        },
+    ]
+    rendered: list[str] = []
+    for index, example in enumerate(examples, start=1):
+        rendered.extend(
+            [
+                f"Example {index}",
+                f"- Scene: {json.dumps(example['scene'], sort_keys=True)}",
+                f"- User: {example['user']}",
+                f"- Valid output: {json.dumps(example['output'])}",
+                f"- Why valid: {example['why']}",
+            ]
+        )
+    return "\n".join(rendered)
+
+
 def _system_prompt() -> str:
-    tool_metadata = json.dumps(_tool_metadata(), indent=2, sort_keys=True)
+    tool_catalog = _format_tool_catalog()
+    examples = _format_examples()
     return (
         "You are Vectra's semantic planner.\n"
+        "Your job is to convert a natural-language request plus scene state into a valid JSON array of structured actions.\n"
+        "You are not writing Python and you are not describing what to do in prose.\n"
         "Return only a JSON array of actions.\n"
         "Do not return markdown.\n"
         "Do not explain your reasoning.\n"
@@ -189,25 +353,84 @@ def _system_prompt() -> str:
         '- optional "action_id" (unique string if present)\n'
         '- required "tool" (must exactly match one listed tool name)\n'
         '- required "params" (JSON object)\n'
+        "Use the fewest actions needed.\n"
+        "Prefer a valid action grounded in the available tools and scene state over returning an empty plan for a simple request.\n"
+        "Only return [] if the request truly cannot be expressed with the available tools.\n"
         'Reference syntax must use JSON object form {"$ref": "action_id.output_key"}.\n'
         "Never emit $ref(...) strings or any other shorthand.\n"
-        "Use the minimum number of actions needed.\n"
         "Do not hallucinate tools, params, or outputs.\n"
         "You may use $ref chaining only when the referenced action_id and output key exist in the listed tool output_schema.\n"
-        "If the request cannot be completed with the available tools, return [].\n"
-        "Available tools:\n"
-        f"{tool_metadata}"
+        "Use scene_state.objects to resolve existing objects.\n"
+        "Prefer the active object first, then selected objects, then the closest exact scene object name.\n"
+        "If the user says 'cube', and an object named 'Cube' exists in scene_state.objects, use 'Cube' as object_name.\n"
+        "If the user says 'it', resolve 'it' to the active object first, then the only selected object.\n"
+        "location, rotation_euler, and scale are vectors in [x, y, z] order.\n"
+        "If the user specifies only one axis, preserve the other axes from the matched object's current transform in scene_state.objects.\n"
+        "For example, 'x 10' means [10, current_y, current_z].\n"
+        "If the user asks for a relative move like right, left, up, down, forward, or back without a number, convert it into a concrete vector by changing only the implied axis and using a default relative step of 2 Blender units.\n"
+        "A request to move or shift an existing object should usually use object.transform.\n"
+        "A request to create a new basic shape should usually use mesh.create_primitive.\n"
+        "Choose the closest supported primitive only when it matches the user's requested shape and no existing object is being targeted.\n"
+        "Tool catalog:\n"
+        f"{tool_catalog}\n"
+        "Illustrative examples. These teach the representation pattern and are not an exhaustive list of accepted phrases:\n"
+        f"{examples}"
     )
 
 
-def _messages(prompt: str, scene_state: dict[str, Any], correction: str | None = None) -> list[dict[str, str]]:
-    payload = json.dumps({"prompt": prompt, "scene_state": scene_state}, indent=2, sort_keys=True)
+def _scene_object_summary(scene_state: dict[str, Any]) -> str:
+    objects = scene_state.get("objects", [])
+    if not isinstance(objects, list) or not objects:
+        return "- No scene objects provided"
+
+    lines: list[str] = []
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        lines.append(
+            "- "
+            f"{obj.get('name', '<unknown>')} | type={obj.get('type', '<unknown>')} | "
+            f"active={obj.get('active', False)} | selected={obj.get('selected', False)} | "
+            f"location={obj.get('location', [])} | rotation_euler={obj.get('rotation_euler', [])} | "
+            f"scale={obj.get('scale', [])}"
+        )
+    return "\n".join(lines) if lines else "- No scene objects provided"
+
+
+def _user_content(prompt: str, scene_state: dict[str, Any]) -> str:
+    return (
+        f"User request:\n{prompt}\n\n"
+        "Scene focus:\n"
+        f"- active_object: {scene_state.get('active_object')}\n"
+        f"- selected_objects: {scene_state.get('selected_objects', [])}\n"
+        f"- current_frame: {scene_state.get('current_frame')}\n\n"
+        "Scene objects summary:\n"
+        f"{_scene_object_summary(scene_state)}\n\n"
+        "Raw scene_state JSON:\n"
+        f"{json.dumps(scene_state, indent=2, sort_keys=True)}"
+    )
+
+
+def _messages(
+    prompt: str,
+    scene_state: dict[str, Any],
+    *,
+    invalid_response: str | None = None,
+    repair: bool = False,
+) -> list[dict[str, str]]:
     messages = [
         {"role": "system", "content": _system_prompt()},
-        {"role": "user", "content": payload},
+        {"role": "user", "content": _user_content(prompt, scene_state)},
     ]
-    if correction is not None:
-        messages.append({"role": "user", "content": correction})
+    if invalid_response is not None:
+        messages.append({"role": "assistant", "content": invalid_response})
+    if repair:
+        messages.append(
+            {
+                "role": "user",
+                "content": "Return ONLY valid JSON array. No explanation.",
+            }
+        )
     return messages
 
 
@@ -256,10 +479,10 @@ def _parse_actions(content: str) -> list[dict[str, Any]]:
     return parsed
 
 
-def _request_actions_for_config(
+def _request_content_for_config(
     config: LLMEndpointConfig,
     messages: list[dict[str, str]],
-) -> list[dict[str, Any]]:
+) -> str:
     try:
         response = httpx.post(
             f"{config.base_url}/chat/completions",
@@ -283,14 +506,41 @@ def _request_actions_for_config(
     except ValueError as exc:
         raise LLMResponseError(f"LLM response body was not valid JSON for {config.name}") from exc
 
-    return _parse_actions(_extract_message_content(payload))
+    content = _extract_message_content(payload)
+    print("RAW LLM OUTPUT:", content)
+    return content
 
 
-def _request_actions(messages: list[dict[str, str]]) -> list[dict[str, Any]]:
+def _request_actions_for_config(
+    config: LLMEndpointConfig,
+    prompt: str,
+    scene_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    messages = _messages(prompt, scene_state)
+    content = _request_content_for_config(config, messages)
+    try:
+        return _parse_actions(content)
+    except LLMResponseError as first_exc:
+        repair_messages = _messages(
+            prompt,
+            scene_state,
+            invalid_response=content,
+            repair=True,
+        )
+        repair_content = _request_content_for_config(config, repair_messages)
+        try:
+            return _parse_actions(repair_content)
+        except LLMResponseError as repair_exc:
+            raise LLMResponseError(
+                f"{first_exc}; repair failed: {repair_exc}"
+            ) from repair_exc
+
+
+def _request_actions(prompt: str, scene_state: dict[str, Any]) -> list[dict[str, Any]]:
     last_error: LLMClientError | None = None
     for config in _available_configs():
         try:
-            return _request_actions_for_config(config, messages)
+            return _request_actions_for_config(config, prompt, scene_state)
         except LLMClientError as exc:
             last_error = exc
 
@@ -300,16 +550,4 @@ def _request_actions(messages: list[dict[str, str]]) -> list[dict[str, Any]]:
 
 
 def generate_actions(prompt: str, scene_state: dict[str, Any]) -> list[dict[str, Any]]:
-    messages = _messages(prompt, scene_state)
-    try:
-        return _request_actions(messages)
-    except LLMResponseError:
-        retry_messages = _messages(
-            prompt,
-            scene_state,
-            correction=(
-                "Your previous response was invalid. "
-                "Return only a raw JSON array of actions with no markdown fences or explanations."
-            ),
-        )
-        return _request_actions(retry_messages)
+    return _request_actions(prompt, scene_state)
