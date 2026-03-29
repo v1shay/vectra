@@ -300,6 +300,25 @@ def _format_examples() -> str:
         },
         {
             "scene": {
+                "active_object": None,
+                "selected_objects": [],
+                "objects": [],
+            },
+            "user": "make a sphere and put it at x 10",
+            "output": [
+                {
+                    "action_id": "create_sphere",
+                    "tool": "mesh.create_primitive",
+                    "params": {
+                        "primitive_type": "uv_sphere",
+                        "location": {"x": 10},
+                    },
+                }
+            ],
+            "why": "If the user is creating a new basic shape and gives a placement at the same time, place it directly with the create action instead of adding an unnecessary transform step.",
+        },
+        {
+            "scene": {
                 "active_object": "Cube",
                 "selected_objects": ["Cube"],
                 "objects": [
@@ -365,11 +384,13 @@ def _system_prompt() -> str:
         "If the user says 'cube', and an object named 'Cube' exists in scene_state.objects, use 'Cube' as object_name.\n"
         "If the user says 'it', resolve 'it' to the active object first, then the only selected object.\n"
         "location, rotation_euler, and scale are vectors in [x, y, z] order.\n"
+        "Optional params should be omitted when they are not needed. Prefer omission over null values or empty strings.\n"
         "If the user specifies only one axis, preserve the other axes from the matched object's current transform in scene_state.objects.\n"
         "For example, 'x 10' means [10, current_y, current_z].\n"
         "If the user asks for a relative move like right, left, up, down, forward, or back without a number, convert it into a concrete vector by changing only the implied axis and using a default relative step of 2 Blender units.\n"
         "A request to move or shift an existing object should usually use object.transform.\n"
         "A request to create a new basic shape should usually use mesh.create_primitive.\n"
+        "If the user creates a new basic shape and provides an immediate placement, prefer setting mesh.create_primitive.location directly unless a later step truly depends on a prior action output.\n"
         "Choose the closest supported primitive only when it matches the user's requested shape and no existing object is being targeted.\n"
         "Tool catalog:\n"
         f"{tool_catalog}\n"
