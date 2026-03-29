@@ -13,6 +13,7 @@ from ..utils.logging import get_vectra_logger
 logger = get_vectra_logger("vectra.blender")
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 ALLOWED_PHASES = {"idle", "sending", "success", "error"}
 
 _request_lock = threading.Lock()
@@ -30,7 +31,8 @@ def _build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
     scene = context.scene
     active_object = context.active_object
     objects = []
-    for obj in scene.objects:
+    scene_objects = getattr(scene, "objects", [])
+    for obj in scene_objects:
         objects.append(
             {
                 "name": obj.name,
@@ -86,7 +88,11 @@ def _get_execution_engine() -> ExecutionEngine:
 
 def _worker(payload: dict[str, Any], base_url: str, result_queue: queue.Queue[tuple[str, Any]]) -> None:
     try:
-        response = create_task(payload, base_url=base_url, timeout=5.0)
+        response = create_task(
+            payload,
+            base_url=base_url,
+            timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        )
         result_queue.put(("success", response))
     except BridgeClientError as exc:
         logger.warning("Vectra request failed: %s", exc)
@@ -154,7 +160,8 @@ def _poll_request_result() -> float | None:
                     phase="success",
                 )
         else:
-            _apply_ui_state(scene, status="Connection failed", phase="error")
+            error_message = str(payload).strip() if payload is not None else "Connection failed"
+            _apply_ui_state(scene, status=error_message, phase="error")
 
     _finalize_request()
     return None

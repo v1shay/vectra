@@ -38,6 +38,23 @@ class FakeLLMResponse:
         }
 
 
+class FakeJSONResponse:
+    def __init__(self, payload: dict[str, object], status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                "request failed",
+                request=httpx.Request("GET", "http://testserver/api/tags"),
+                response=httpx.Response(self.status_code),
+            )
+
+    def json(self) -> dict[str, object]:
+        return self._payload
+
+
 def _configure_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VECTRA_LLM_BASE_URL", "http://testserver")
     monkeypatch.setenv("VECTRA_LLM_API_KEY", "test-key")
@@ -78,6 +95,71 @@ def test_generate_actions_retries_once_on_invalid_json(monkeypatch: pytest.Monke
     actions = generate_actions("move cube", {"active_object": "Cube"})
 
     assert actions == MOVE_CUBE_ACTIONS
+
+
+def test_generate_actions_falls_back_to_generic_secondary_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_env(monkeypatch)
+    monkeypatch.setenv("VECTRA_LLM_FALLBACK_BASE_URL", "http://fallback.local/v1")
+    monkeypatch.setenv("VECTRA_LLM_FALLBACK_API_KEY", "fallback-key")
+    monkeypatch.setenv("VECTRA_LLM_FALLBACK_MODEL", "kimi-k2")
+    monkeypatch.setattr("agent_runtime.llm_client._read_ollama_config", lambda: None)
+
+    requested_urls: list[str] = []
+
+    def fake_post(url: str, *args, **kwargs):
+        requested_urls.append(url)
+        if "testserver" in url:
+            raise httpx.ConnectError("primary unavailable")
+        return FakeLLMResponse(
+            '[{"action_id":"create_cube","tool":"mesh.create_primitive","params":{"primitive_type":"cube","name":"VectraCube","location":[0,0,0]}}]'
+        )
+
+    monkeypatch.setattr("agent_runtime.llm_client.httpx.post", fake_post)
+
+    actions = generate_actions("create a cube", {})
+
+    assert actions == CREATE_CUBE_ACTIONS
+    assert requested_urls == [
+        "http://testserver/chat/completions",
+        "http://fallback.local/v1/chat/completions",
+    ]
+
+
+def test_generate_actions_falls_back_to_ollama_when_primary_config_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VECTRA_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_MODEL", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_FALLBACK_BASE_URL", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_FALLBACK_API_KEY", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_FALLBACK_MODEL", raising=False)
+    monkeypatch.delenv("VECTRA_OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+
+    monkeypatch.setattr(
+        "agent_runtime.llm_client.httpx.get",
+        lambda *args, **kwargs: FakeJSONResponse(
+            {"models": [{"name": "qwen2.5-coder:32b"}, {"name": "deepseek-coder-v2:16b"}]}
+        ),
+    )
+
+    requested_urls: list[str] = []
+
+    def fake_post(url: str, *args, **kwargs):
+        requested_urls.append(url)
+        return FakeLLMResponse(
+            '[{"action_id":"create_cube","tool":"mesh.create_primitive","params":{"primitive_type":"cube","name":"VectraCube","location":[0,0,0]}}]'
+        )
+
+    monkeypatch.setattr("agent_runtime.llm_client.httpx.post", fake_post)
+
+    actions = generate_actions("create a cube", {})
+
+    assert actions == CREATE_CUBE_ACTIONS
+    assert requested_urls == ["http://127.0.0.1:11434/v1/chat/completions"]
 
 
 def test_plan_returns_safe_failure_on_invalid_llm_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,6 +211,31 @@ def test_plan_rejects_duplicate_action_ids(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert result.actions == []
     assert result.message == "No actions returned: Duplicate action_id 'dup'"
+
+
+def test_plan_rejects_string_ref_shorthand(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        planner_module,
+        "generate_actions",
+        lambda prompt, scene_state: [
+            {
+                "action_id": "move_cube",
+                "tool": "object.transform",
+                "params": {
+                    "object_name": "$ref(create_cube.object_name)",
+                    "location": [2, 0, 0],
+                },
+            }
+        ],
+    )
+
+    result = plan("move cube", {})
+
+    assert result.actions == []
+    assert result.message == (
+        "No actions returned: Action 'object.transform' must encode refs as objects at "
+        "params.object_name"
+    )
 
 
 def test_plan_preserves_prompt_sensitive_actions(monkeypatch: pytest.MonkeyPatch) -> None:

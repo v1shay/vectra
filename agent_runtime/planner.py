@@ -27,6 +27,44 @@ def _get_registry() -> ToolRegistry:
     return registry
 
 
+def _validate_param_value(value: Any, *, tool_name: str, path: str) -> None:
+    if isinstance(value, Mapping):
+        if set(value.keys()) == {"$ref"}:
+            raw_ref = value["$ref"]
+            if not isinstance(raw_ref, str) or "." not in raw_ref:
+                raise PlannerValidationError(
+                    f"Action '{tool_name}' has an invalid $ref at {path}"
+                )
+            action_id, output_key = raw_ref.split(".", 1)
+            if not action_id or not output_key:
+                raise PlannerValidationError(
+                    f"Action '{tool_name}' has an invalid $ref at {path}"
+                )
+            return
+
+        for nested_key, nested_value in value.items():
+            _validate_param_value(
+                nested_value,
+                tool_name=tool_name,
+                path=f"{path}.{nested_key}",
+            )
+        return
+
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_param_value(
+                item,
+                tool_name=tool_name,
+                path=f"{path}[{index}]",
+            )
+        return
+
+    if isinstance(value, str) and value.startswith("$ref("):
+        raise PlannerValidationError(
+            f"Action '{tool_name}' must encode refs as objects at {path}"
+        )
+
+
 def _validate_actions(actions: list[dict[str, Any]], registry: ToolRegistry) -> list[dict[str, Any]]:
     if not isinstance(actions, list):
         raise PlannerValidationError("Planner output must be a list")
@@ -58,6 +96,8 @@ def _validate_actions(actions: list[dict[str, Any]], registry: ToolRegistry) -> 
             if action_id in seen_action_ids:
                 raise PlannerValidationError(f"Duplicate action_id '{action_id}'")
             seen_action_ids.add(action_id)
+
+        _validate_param_value(params, tool_name=tool_name, path="params")
 
         validated_action = {
             "tool": tool_name,
