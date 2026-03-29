@@ -105,4 +105,6 @@ def create_task(
     missing = required_keys.difference(data)
     if missing:
         raise BridgeResponseError(f"Task response missing keys: {sorted(missing)}")
+    if not isinstance(data["actions"], list):
+        raise BridgeResponseError("Task response field 'actions' must be a list")
     return data

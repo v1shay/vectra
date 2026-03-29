@@ -6,6 +6,26 @@ from agent_runtime.main import app
 
 client = TestClient(app)
 
+EXPECTED_ACTIONS = [
+    {
+        "action_id": "create_cube",
+        "tool": "mesh.create_primitive",
+        "params": {
+            "primitive_type": "cube",
+            "name": "VectraCube",
+            "location": [0.0, 0.0, 0.0],
+        },
+    },
+    {
+        "action_id": "move_cube",
+        "tool": "object.transform",
+        "params": {
+            "object_name": {"$ref": "create_cube.object_name"},
+            "location": [2.0, 0.0, 0.0],
+        },
+    },
+]
+
 
 def test_health_returns_ok() -> None:
     response = client.get("/health")
@@ -30,8 +50,8 @@ def test_create_task_returns_stub_response() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "message": "received",
-        "actions": [],
+        "message": "planned",
+        "actions": EXPECTED_ACTIONS,
     }
 
 
@@ -53,6 +73,24 @@ def test_create_task_is_deterministic_for_identical_input() -> None:
     assert second.status_code == 200
     assert first.json() == second.json() == {
         "status": "ok",
-        "message": "received",
-        "actions": [],
+        "message": "planned",
+        "actions": EXPECTED_ACTIONS,
     }
+
+
+def test_create_task_action_schema_is_structured() -> None:
+    response = client.post(
+        "/task/create",
+        json={
+            "prompt": "Create a cube",
+            "scene_state": {},
+            "images": [],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload["actions"], list)
+    assert payload["actions"][0]["action_id"] == "create_cube"
+    assert payload["actions"][0]["tool"] == "mesh.create_primitive"
+    assert payload["actions"][1]["params"]["object_name"] == {"$ref": "create_cube.object_name"}
