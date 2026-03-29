@@ -6,6 +6,7 @@ from typing import Any
 from urllib import error, request
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_TASK_TIMEOUT_SECONDS = 30.0
 
 
 class BridgeClientError(Exception):
@@ -91,7 +92,7 @@ def health_check(base_url: str = DEFAULT_BASE_URL, timeout: float = 2.0) -> dict
 def create_task(
     payload: dict[str, Any],
     base_url: str = DEFAULT_BASE_URL,
-    timeout: float = 5.0,
+    timeout: float = DEFAULT_TASK_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     data = _request_json(
         "POST",

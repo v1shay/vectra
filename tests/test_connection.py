@@ -3,36 +3,19 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from typing import Iterator
 
 import pytest
 import uvicorn
 
-from agent_runtime.main import app
+import agent_runtime.main as runtime_main
+from agent_runtime.planner import PlannerResult
+from tests.action_fixtures import CREATE_CUBE_ACTIONS
 from vectra.bridge.client import (
     BridgeConnectionError,
     create_task,
     health_check,
 )
-
-EXPECTED_ACTIONS = [
-    {
-        "action_id": "create_cube",
-        "tool": "mesh.create_primitive",
-        "params": {
-            "primitive_type": "cube",
-            "name": "VectraCube",
-            "location": [0.0, 0.0, 0.0],
-        },
-    },
-    {
-        "action_id": "move_cube",
-        "tool": "object.transform",
-        "params": {
-            "object_name": {"$ref": "create_cube.object_name"},
-            "location": [2.0, 0.0, 0.0],
-        },
-    },
-]
 
 
 def _find_free_port() -> int:
@@ -42,9 +25,17 @@ def _find_free_port() -> int:
 
 
 @pytest.fixture
-def live_server() -> str:
+def live_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    monkeypatch.setattr(
+        runtime_main,
+        "plan",
+        lambda prompt, scene_state: PlannerResult(
+            actions=CREATE_CUBE_ACTIONS,
+            message=f"planned for {prompt}:{scene_state.get('current_frame', 'missing')}",
+        ),
+    )
     port = _find_free_port()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(runtime_main.app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -84,8 +75,8 @@ def test_bridge_client_talks_to_live_backend(live_server: str) -> None:
     assert health_check(base_url=live_server) == {"status": "ok"}
     assert create_task(payload, base_url=live_server) == {
         "status": "ok",
-        "message": "planned",
-        "actions": EXPECTED_ACTIONS,
+        "message": "planned for Add a light:1",
+        "actions": CREATE_CUBE_ACTIONS,
     }
 
 

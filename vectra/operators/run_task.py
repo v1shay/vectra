@@ -13,6 +13,7 @@ from ..utils.logging import get_vectra_logger
 logger = get_vectra_logger("vectra.blender")
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 ALLOWED_PHASES = {"idle", "sending", "success", "error"}
 
 _request_lock = threading.Lock()
@@ -20,6 +21,36 @@ _request_thread: threading.Thread | None = None
 _request_queue: queue.Queue[tuple[str, Any]] | None = None
 _request_scene_name: str | None = None
 _execution_engine: ExecutionEngine | None = None
+
+
+def _vector_to_list(vector: Any) -> list[float]:
+    return [float(component) for component in vector[:3]]
+
+
+def _build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
+    scene = context.scene
+    active_object = context.active_object
+    objects = []
+    scene_objects = getattr(scene, "objects", [])
+    for obj in scene_objects:
+        objects.append(
+            {
+                "name": obj.name,
+                "type": obj.type,
+                "selected": bool(obj.select_get()),
+                "active": active_object is not None and obj == active_object,
+                "location": _vector_to_list(obj.location),
+                "rotation_euler": _vector_to_list(obj.rotation_euler),
+                "scale": _vector_to_list(obj.scale),
+            }
+        )
+
+    return {
+        "active_object": active_object.name if active_object else None,
+        "selected_objects": [obj.name for obj in context.selected_objects],
+        "current_frame": scene.frame_current,
+        "objects": objects,
+    }
 
 
 def _set_phase(scene: bpy.types.Scene, phase: str) -> None:
@@ -57,7 +88,11 @@ def _get_execution_engine() -> ExecutionEngine:
 
 def _worker(payload: dict[str, Any], base_url: str, result_queue: queue.Queue[tuple[str, Any]]) -> None:
     try:
-        response = create_task(payload, base_url=base_url, timeout=5.0)
+        response = create_task(
+            payload,
+            base_url=base_url,
+            timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        )
         result_queue.put(("success", response))
     except BridgeClientError as exc:
         logger.warning("Vectra request failed: %s", exc)
@@ -125,7 +160,8 @@ def _poll_request_result() -> float | None:
                     phase="success",
                 )
         else:
-            _apply_ui_state(scene, status="Connection failed", phase="error")
+            error_message = str(payload).strip() if payload is not None else "Connection failed"
+            _apply_ui_state(scene, status=error_message, phase="error")
 
     _finalize_request()
     return None
@@ -163,11 +199,7 @@ class VECTRA_OT_run_task(bpy.types.Operator):
 
             payload = {
                 "prompt": scene.vectra_prompt,
-                "scene_state": {
-                    "active_object": context.active_object.name if context.active_object else None,
-                    "selected_objects": [obj.name for obj in context.selected_objects],
-                    "current_frame": scene.frame_current,
-                },
+                "scene_state": _build_scene_state(context),
                 "images": [],
             }
 

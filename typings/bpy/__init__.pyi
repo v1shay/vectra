@@ -1,17 +1,25 @@
+from collections.abc import Iterator
 from typing import Any, Callable
 
 
 class Object:
     name: str
+    type: str
     location: Any
     rotation_euler: Any
     scale: Any
+    def select_get(self) -> bool: ...
+
+
+class _SceneObjectCollection:
+    def __iter__(self) -> Iterator[Object]: ...
 
 
 class types:
     class Scene:
         name: str
         frame_current: int
+        objects: _SceneObjectCollection
         vectra_prompt: str
         vectra_status: str
         vectra_phase: str

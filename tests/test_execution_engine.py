@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from agent_runtime.planner_stub import build_task_response
 from vectra.execution.engine import ExecutionEngine
 from vectra.tools.base import BaseTool, ToolExecutionResult, ToolValidationError
 from vectra.tools.registry import ToolRegistry
@@ -64,6 +63,27 @@ class RejectingTransformTool(FakeTransformTool):
         raise ToolValidationError("Invalid transform params")
 
 
+EXECUTION_LOOP_ACTIONS = [
+    {
+        "action_id": "create_cube",
+        "tool": "mesh.create_primitive",
+        "params": {
+            "primitive_type": "cube",
+            "name": "VectraCube",
+            "location": [0.0, 0.0, 0.0],
+        },
+    },
+    {
+        "action_id": "move_cube",
+        "tool": "object.transform",
+        "params": {
+            "object_name": {"$ref": "create_cube.object_name"},
+            "location": [2.0, 0.0, 0.0],
+        },
+    },
+]
+
+
 def _make_engine(*tool_classes: type[BaseTool]) -> ExecutionEngine:
     registry = ToolRegistry()
     for tool_cls in tool_classes:
@@ -74,14 +94,7 @@ def _make_engine(*tool_classes: type[BaseTool]) -> ExecutionEngine:
 def test_execution_engine_runs_actions_sequentially_with_refs() -> None:
     engine = _make_engine(FakeCreatePrimitiveTool, FakeTransformTool)
     context = FakeContext()
-    response = build_task_response(prompt="test", scene_state={}, images=[])
-
-    if hasattr(response, "model_dump"):
-        actions = response.model_dump()["actions"]
-    else:  # pragma: no cover - compatibility fallback
-        actions = response.dict()["actions"]
-
-    report = engine.run(context, actions)
+    report = engine.run(context, EXECUTION_LOOP_ACTIONS)
 
     assert report.success is True
     assert report.message == "Executed 2 action(s) successfully"
@@ -151,12 +164,7 @@ def test_execution_engine_unresolved_ref_fails_safely() -> None:
 def test_backend_action_to_execution_loop_works() -> None:
     engine = _make_engine(FakeCreatePrimitiveTool, FakeTransformTool)
     context = FakeContext()
-    response = build_task_response(prompt="loop", scene_state={}, images=[])
-
-    if hasattr(response, "model_dump"):
-        payload = response.model_dump()
-    else:  # pragma: no cover - compatibility fallback
-        payload = response.dict()
+    payload = {"status": "ok", "message": "planned", "actions": EXECUTION_LOOP_ACTIONS}
 
     report = engine.run(context, payload["actions"])
 

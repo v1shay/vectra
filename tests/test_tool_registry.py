@@ -53,6 +53,9 @@ def test_tool_registry_discover_loads_decorated_tools() -> None:
 
     assert "mesh.create_primitive" in discovered_tools
     assert "object.transform" in discovered_tools
+    assert registry.get("mesh.create_primitive").output_schema == {
+        "object_name": {"type": "string"}
+    }
 
 
 def test_tool_registry_unknown_tool_lookup_raises_error() -> None:
