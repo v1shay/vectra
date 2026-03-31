@@ -85,5 +85,5 @@ def test_bridge_client_raises_clear_error_when_backend_is_offline() -> None:
     unused_port = _find_free_port()
     base_url = f"http://127.0.0.1:{unused_port}"
 
-    with pytest.raises(BridgeConnectionError):
+    with pytest.raises(BridgeConnectionError, match="Failed to connect to backend at"):
         health_check(base_url=base_url, timeout=0.2)

@@ -6,8 +6,10 @@ from typing import Any
 
 import bpy
 
+from ..addon_bootstrap import current_dev_source_path
 from ..bridge.client import BridgeClientError, create_task
 from ..execution.engine import ExecutionEngine
+from ..runtime_service import ensure_local_backend
 from ..utils.logging import get_vectra_logger, log_structured
 
 logger = get_vectra_logger("vectra.blender")
@@ -86,6 +88,10 @@ def _get_execution_engine() -> ExecutionEngine:
 
 def _worker(payload: dict[str, Any], base_url: str, result_queue: queue.Queue[tuple[str, Any]]) -> None:
     try:
+        ensure_local_backend(
+            base_url=base_url,
+            repo_root_hint=current_dev_source_path(),
+        )
         response = create_task(
             payload,
             base_url=base_url,
