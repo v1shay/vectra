@@ -12,7 +12,7 @@ def iter_addon_files(source_dir: Path):
     for path in sorted(source_dir.rglob("*")):
         if path.is_dir():
             continue
-        if "__pycache__" in path.parts or path.suffix == ".pyc":
+        if "__pycache__" in path.parts or path.suffix == ".pyc" or path.name == ".DS_Store":
             continue
         yield path
 

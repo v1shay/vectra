@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 try:
@@ -17,54 +16,19 @@ SUPPORTED_PRIMITIVES = {
     "uv_sphere": "primitive_uv_sphere_add",
 }
 
-AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
-
-
-def _validate_vector3(
-    value: Any,
-    field_name: str,
-    *,
-    default: tuple[float, float, float] | None = None,
-) -> tuple[float, float, float]:
-    if value is None:
-        if default is not None:
-            return default
+def _validate_vector3(value: Any, field_name: str) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
         raise ToolValidationError(f"'{field_name}' must be a 3-item list or tuple")
 
-    if isinstance(value, Mapping):
-        if not value:
-            if default is not None:
-                return default
-            raise ToolValidationError(f"'{field_name}' mapping must include at least one axis")
-
-        unexpected_axes = sorted(set(value) - set(AXIS_INDEX))
-        if unexpected_axes:
-            raise ToolValidationError(
-                f"'{field_name}' mapping may only use x, y, and z axes"
-            )
-
-        base = list(default) if default is not None else [None, None, None]
-        for axis, raw_component in value.items():
-            try:
-                base[AXIS_INDEX[axis]] = float(raw_component)
-            except (TypeError, ValueError) as exc:
-                raise ToolValidationError(f"'{field_name}' values must be numeric") from exc
-
-        if any(component is None for component in base):
-            raise ToolValidationError(
-                f"'{field_name}' must include all x, y, and z values when no default is available"
-            )
-
-        return (float(base[0]), float(base[1]), float(base[2]))
-
-    if not isinstance(value, (list, tuple)) or len(value) != 3:
-        raise ToolValidationError(
-            f"'{field_name}' must be a 3-item list or tuple, or an axis mapping"
-        )
-    try:
-        return (float(value[0]), float(value[1]), float(value[2]))
-    except (TypeError, ValueError) as exc:
-        raise ToolValidationError(f"'{field_name}' values must be numeric") from exc
+    normalized: list[float] = []
+    for component in value:
+        if isinstance(component, bool):
+            raise ToolValidationError(f"'{field_name}' values must be numeric")
+        try:
+            normalized.append(float(component))
+        except (TypeError, ValueError) as exc:
+            raise ToolValidationError(f"'{field_name}' values must be numeric") from exc
+    return (normalized[0], normalized[1], normalized[2])
 
 
 def _normalize_optional_name(value: Any) -> str | None:
@@ -74,7 +38,9 @@ def _normalize_optional_name(value: Any) -> str | None:
         raise ToolValidationError("'name' must be a string when provided")
 
     normalized = value.strip()
-    return normalized or None
+    if not normalized:
+        raise ToolValidationError("'name' must be a non-empty string when provided")
+    return normalized
 
 
 def _current_mode(context: Any) -> str | None:
@@ -129,7 +95,11 @@ class CreatePrimitiveTool(BaseTool):
         "surface, or a UV sphere for spheres, balls, and other round 3D shapes."
     )
     input_schema = {
-        "primitive_type": {"type": "string", "enum": sorted(SUPPORTED_PRIMITIVES)},
+        "primitive_type": {
+            "type": "string",
+            "enum": sorted(SUPPORTED_PRIMITIVES),
+            "required": True,
+        },
         "name": {"type": "string", "required": False},
         "location": {"type": "vector3", "required": False},
     }
@@ -146,12 +116,13 @@ class CreatePrimitiveTool(BaseTool):
                 f"'primitive_type' must be one of {sorted(SUPPORTED_PRIMITIVES)}"
             )
 
-        name = _normalize_optional_name(params.get("name"))
-        location = _validate_vector3(
-            params.get("location"),
-            "location",
-            default=(0.0, 0.0, 0.0),
-        )
+        name = None
+        if "name" in params:
+            name = _normalize_optional_name(params["name"])
+
+        location = (0.0, 0.0, 0.0)
+        if "location" in params:
+            location = _validate_vector3(params["location"], "location")
 
         return {
             "primitive_type": primitive_type,

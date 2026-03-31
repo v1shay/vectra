@@ -8,7 +8,7 @@ import bpy
 
 from ..bridge.client import BridgeClientError, create_task
 from ..execution.engine import ExecutionEngine
-from ..utils.logging import get_vectra_logger
+from ..utils.logging import get_vectra_logger, log_structured
 
 logger = get_vectra_logger("vectra.blender")
 
@@ -60,8 +60,6 @@ def _set_phase(scene: bpy.types.Scene, phase: str) -> None:
 
 
 def _apply_ui_state(scene: bpy.types.Scene, *, status: str, phase: str) -> None:
-    print("VECTRA DEBUG: setting status =", status)
-    print("VECTRA DEBUG: setting phase =", phase)
     _set_phase(scene, phase)
     scene.vectra_status = status
 
@@ -128,15 +126,13 @@ def _poll_request_result() -> float | None:
         scene.vectra_request_in_flight = False
         if result_type == "success":
             response = payload
-            print("VECTRA DEBUG: backend response =", response)
+            log_structured(logger, "backend_response", response)
             actions = payload.get("actions", [])
-            print("VECTRA DEBUG: actions =", actions)
-            print("VECTRA DEBUG: actions type =", type(actions).__name__)
-            if actions:
+            response_status = str(payload.get("status", "error")).strip().lower()
+            planner_message = str(payload.get("message", "No actions returned")).strip()
+            if response_status == "ok" and actions:
                 try:
-                    print("VECTRA DEBUG: about to run execution engine")
                     report = _get_execution_engine().run(bpy.context, actions)
-                    print("VECTRA DEBUG: execution report =", report)
                 except Exception:  # pragma: no cover - defensive safeguard for Blender runtime
                     logger.exception("Unexpected Vectra execution failure")
                     _apply_ui_state(scene, status="Execution failed", phase="error")
@@ -157,12 +153,10 @@ def _poll_request_result() -> float | None:
                             phase="error",
                         )
             else:
-                planner_message = str(payload.get("message", "No actions returned")).strip()
-                phase = "error" if planner_message.startswith("No actions returned:") else "success"
                 _apply_ui_state(
                     scene,
                     status=planner_message,
-                    phase=phase,
+                    phase="error",
                 )
         else:
             error_message = str(payload).strip() if payload is not None else "Connection failed"

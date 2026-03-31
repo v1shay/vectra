@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import importlib
 import sys
 from types import ModuleType, SimpleNamespace
@@ -216,6 +217,46 @@ def test_run_task_blocks_reload_while_worker_thread_is_active(
     assert run_task_module.get_reload_block_reason() == (
         "Cannot reload Vectra while a request worker thread is still running"
     )
+
+
+def test_run_task_marks_empty_error_response_as_error_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bpy = _make_fake_bpy()
+    scene = fake_bpy.types.Scene()
+    scene.name = "Scene"
+    scene.vectra_request_in_flight = True
+    scene.vectra_phase = "sending"
+    scene.vectra_status = "Sending request..."
+    fake_bpy.context.scene = scene
+    fake_bpy.data.scenes["Scene"] = scene
+
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    sys.modules.pop("vectra.operators.run_task", None)
+    run_task_module = _reload_module("vectra.operators.run_task")
+
+    result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+    result_queue.put(
+        (
+            "success",
+            {
+                "status": "error",
+                "message": "No actions returned: invalid request",
+                "actions": [],
+            },
+        )
+    )
+
+    run_task_module._request_queue = result_queue
+    run_task_module._request_scene_name = "Scene"
+    run_task_module._request_thread = None
+
+    result = run_task_module._poll_request_result()
+
+    assert result is None
+    assert scene.vectra_request_in_flight is False
+    assert scene.vectra_phase == "error"
+    assert scene.vectra_status == "No actions returned: invalid request"
 
 
 def test_bootstrap_register_replaces_stale_preferences_class(

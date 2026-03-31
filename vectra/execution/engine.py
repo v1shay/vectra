@@ -11,6 +11,7 @@ from ..utils.logging import (
     log_action_failure,
     log_action_start,
     log_action_success,
+    log_execution_report,
 )
 
 
@@ -108,12 +109,14 @@ class ExecutionEngine:
                         error=message,
                     )
                 )
-                return ExecutionReport(
+                report = ExecutionReport(
                     success=False,
                     results=results,
                     failed_action_id=action_id,
                     message=f"Action failed: {tool_name} - {message}",
                 )
+                log_execution_report(self.logger, report)
+                return report
             except Exception as exc:  # pragma: no cover - hard guard for Blender runtime
                 message = f"Unexpected execution error: {exc}"
                 log_action_failure(self.logger, action_id, tool_name, message)
@@ -125,19 +128,23 @@ class ExecutionEngine:
                         error=message,
                     )
                 )
-                return ExecutionReport(
+                report = ExecutionReport(
                     success=False,
                     results=results,
                     failed_action_id=action_id,
                     message=f"Action failed: {tool_name} - {message}",
                 )
+                log_execution_report(self.logger, report)
+                return report
 
         success_message = (
             "No actions to execute"
             if not results
             else f"Executed {len(results)} action(s) successfully"
         )
-        return ExecutionReport(success=True, results=results, message=success_message)
+        report = ExecutionReport(success=True, results=results, message=success_message)
+        log_execution_report(self.logger, report)
+        return report
 
     @staticmethod
     def _extract_action_id(raw_action: Any) -> str | None:

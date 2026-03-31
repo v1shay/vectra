@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 try:
@@ -11,30 +10,6 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in plain Python test
 from .base import BaseTool, ToolExecutionError, ToolExecutionResult, ToolValidationError
 from .mesh_tools import _validate_vector3
 from .registry import register_tool
-
-
-def _normalize_transform_value(value: Any, field_name: str) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        if not value:
-            raise ToolValidationError(f"'{field_name}' mapping must include at least one axis")
-
-        unexpected_axes = sorted(set(value) - {"x", "y", "z"})
-        if unexpected_axes:
-            raise ToolValidationError(
-                f"'{field_name}' mapping may only use x, y, and z axes"
-            )
-
-        normalized: dict[str, float] = {}
-        for axis, raw_component in value.items():
-            try:
-                normalized[axis] = float(raw_component)
-            except (TypeError, ValueError) as exc:
-                raise ToolValidationError(f"'{field_name}' values must be numeric") from exc
-        return normalized
-
-    return _validate_vector3(value, field_name)
 
 
 @register_tool
@@ -55,19 +30,19 @@ class TransformObjectTool(BaseTool):
         params = super().validate_params(params)
 
         object_name = params.get("object_name")
-        if not isinstance(object_name, str) or not object_name:
+        if not isinstance(object_name, str) or not object_name.strip():
             raise ToolValidationError("'object_name' must be a non-empty string")
 
-        normalized: dict[str, Any] = {"object_name": object_name}
-        if "location" in params and params["location"] is not None:
-            normalized["location"] = _normalize_transform_value(params["location"], "location")
-        if "rotation_euler" in params and params["rotation_euler"] is not None:
-            normalized["rotation_euler"] = _normalize_transform_value(
+        normalized: dict[str, Any] = {"object_name": object_name.strip()}
+        if "location" in params:
+            normalized["location"] = _validate_vector3(params["location"], "location")
+        if "rotation_euler" in params:
+            normalized["rotation_euler"] = _validate_vector3(
                 params["rotation_euler"],
                 "rotation_euler",
             )
-        if "scale" in params and params["scale"] is not None:
-            normalized["scale"] = _normalize_transform_value(params["scale"], "scale")
+        if "scale" in params:
+            normalized["scale"] = _validate_vector3(params["scale"], "scale")
 
         if len(normalized) == 1:
             raise ToolValidationError(
@@ -87,23 +62,11 @@ class TransformObjectTool(BaseTool):
             raise ToolExecutionError(f"Object '{validated['object_name']}' was not found")
 
         if "location" in validated:
-            obj.location = _validate_vector3(
-                validated["location"],
-                "location",
-                default=tuple(float(component) for component in obj.location[:3]),
-            )
+            obj.location = validated["location"]
         if "rotation_euler" in validated:
-            obj.rotation_euler = _validate_vector3(
-                validated["rotation_euler"],
-                "rotation_euler",
-                default=tuple(float(component) for component in obj.rotation_euler[:3]),
-            )
+            obj.rotation_euler = validated["rotation_euler"]
         if "scale" in validated:
-            obj.scale = _validate_vector3(
-                validated["scale"],
-                "scale",
-                default=tuple(float(component) for component in obj.scale[:3]),
-            )
+            obj.scale = validated["scale"]
 
         view_layer = getattr(bpy.context, "view_layer", None)
         if view_layer is not None:

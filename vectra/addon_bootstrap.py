@@ -135,7 +135,7 @@ if bpy is not None:
     class VectraAddonPreferences(bpy.types.AddonPreferences):
         bl_idname = ADDON_PACKAGE_NAME
 
-        dev_source_path = bpy.props.StringProperty(
+        dev_source_path: bpy.props.StringProperty(
             name="Dev Source Path",
             description="Path to the local Vectra repo root for live development reloads",
             subtype="DIR_PATH",

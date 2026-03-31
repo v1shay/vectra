@@ -2,86 +2,74 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import vectra.tools.mesh_tools as mesh_tools_module
 import vectra.tools.transform_tools as transform_tools_module
+from vectra.tools.base import ToolValidationError
 from vectra.tools.mesh_tools import CreatePrimitiveTool
 from vectra.tools.transform_tools import TransformObjectTool
 
 
-def test_create_primitive_accepts_null_optional_fields() -> None:
+def test_create_primitive_rejects_null_optional_fields() -> None:
     tool = CreatePrimitiveTool()
 
-    validated = tool.validate_params(
-        {
-            "primitive_type": "uv_sphere",
-            "location": None,
-            "name": None,
-        }
-    )
-
-    assert validated == {
-        "primitive_type": "uv_sphere",
-        "name": None,
-        "location": (0.0, 0.0, 0.0),
-    }
+    with pytest.raises(ToolValidationError, match="'location' must be a 3-item list or tuple"):
+        tool.validate_params(
+            {
+                "primitive_type": "uv_sphere",
+                "location": None,
+                "name": None,
+            }
+        )
 
 
-def test_create_primitive_accepts_axis_mapping_and_blank_name() -> None:
+def test_create_primitive_rejects_blank_name() -> None:
     tool = CreatePrimitiveTool()
 
-    validated = tool.validate_params(
-        {
-            "primitive_type": "plane",
-            "location": {"x": 0, "y": 0, "z": 0},
-            "name": "",
-        }
-    )
-
-    assert validated == {
-        "primitive_type": "plane",
-        "name": None,
-        "location": (0.0, 0.0, 0.0),
-    }
+    with pytest.raises(ToolValidationError, match="'name' must be a non-empty string when provided"):
+        tool.validate_params(
+            {
+                "primitive_type": "plane",
+                "location": [0, 0, 0],
+                "name": "",
+            }
+        )
 
 
-def test_create_primitive_accepts_partial_axis_mapping_with_defaults() -> None:
+def test_create_primitive_rejects_mapping_location() -> None:
     tool = CreatePrimitiveTool()
 
-    validated = tool.validate_params(
-        {
-            "primitive_type": "uv_sphere",
-            "location": {"x": 10},
-        }
-    )
-
-    assert validated == {
-        "primitive_type": "uv_sphere",
-        "name": None,
-        "location": (10.0, 0.0, 0.0),
-    }
+    with pytest.raises(ToolValidationError, match="'location' must be a 3-item list or tuple"):
+        tool.validate_params(
+            {
+                "primitive_type": "uv_sphere",
+                "location": {"x": 10},
+            }
+        )
 
 
-def test_create_primitive_accepts_empty_location_mapping_as_default_origin() -> None:
+def test_create_primitive_accepts_exact_params() -> None:
     tool = CreatePrimitiveTool()
 
     validated = tool.validate_params(
         {
             "primitive_type": "plane",
-            "location": {},
-            "name": "",
+            "location": [1, 2, 3],
+            "name": "Ground",
         }
     )
 
     assert validated == {
         "primitive_type": "plane",
-        "name": None,
-        "location": (0.0, 0.0, 0.0),
+        "name": "Ground",
+        "location": (1.0, 2.0, 3.0),
     }
 
 
-def test_create_primitive_execute_handles_llm_style_optional_fields(monkeypatch) -> None:
+def test_create_primitive_execute_uses_exact_location(monkeypatch) -> None:
     tool = CreatePrimitiveTool()
-    context = SimpleNamespace(active_object=None)
+    context = SimpleNamespace(active_object=None, mode="OBJECT")
     calls: dict[str, object] = {}
 
     def primitive_uv_sphere_add(*, location):
@@ -92,7 +80,8 @@ def test_create_primitive_execute_handles_llm_style_optional_fields(monkeypatch)
     fake_bpy = SimpleNamespace(
         ops=SimpleNamespace(
             mesh=SimpleNamespace(primitive_uv_sphere_add=primitive_uv_sphere_add)
-        )
+        ),
+        context=SimpleNamespace(active_object=None, object=None),
     )
     monkeypatch.setattr(mesh_tools_module, "bpy", fake_bpy)
 
@@ -100,8 +89,8 @@ def test_create_primitive_execute_handles_llm_style_optional_fields(monkeypatch)
         context,
         {
             "primitive_type": "uv_sphere",
-            "location": {},
-            "name": "",
+            "location": [0, 0, 0],
+            "name": "Sphere",
         },
     )
 
@@ -145,6 +134,7 @@ def test_create_primitive_execute_falls_back_to_bpy_context_active_object(monkey
     context = SimpleNamespace(active_object=None, mode="OBJECT")
 
     def primitive_plane_add(*, location):
+        del location
         fake_bpy.context.active_object = created_object
         return {"FINISHED"}
 
@@ -161,23 +151,47 @@ def test_create_primitive_execute_falls_back_to_bpy_context_active_object(monkey
     assert result.outputs == {"object_name": "Plane"}
 
 
-def test_transform_validate_accepts_partial_axis_mapping() -> None:
+def test_transform_validate_rejects_partial_mapping() -> None:
+    tool = TransformObjectTool()
+
+    with pytest.raises(ToolValidationError, match="'location' must be a 3-item list or tuple"):
+        tool.validate_params(
+            {
+                "object_name": "Cube",
+                "location": {"x": 10},
+            }
+        )
+
+
+def test_transform_validate_rejects_null_location() -> None:
+    tool = TransformObjectTool()
+
+    with pytest.raises(ToolValidationError, match="'location' must be a 3-item list or tuple"):
+        tool.validate_params(
+            {
+                "object_name": "Cube",
+                "location": None,
+            }
+        )
+
+
+def test_transform_validate_accepts_exact_vector() -> None:
     tool = TransformObjectTool()
 
     validated = tool.validate_params(
         {
             "object_name": "Cube",
-            "location": {"x": 10},
+            "location": [10, 2, 3],
         }
     )
 
     assert validated == {
         "object_name": "Cube",
-        "location": {"x": 10.0},
+        "location": (10.0, 2.0, 3.0),
     }
 
 
-def test_transform_execute_preserves_unspecified_axes(monkeypatch) -> None:
+def test_transform_execute_sets_exact_location(monkeypatch) -> None:
     tool = TransformObjectTool()
     cube = SimpleNamespace(
         name="Cube",
@@ -200,9 +214,9 @@ def test_transform_execute_preserves_unspecified_axes(monkeypatch) -> None:
         context=None,
         params={
             "object_name": "Cube",
-            "location": {"x": 10},
+            "location": [10, 20, 30],
         },
     )
 
-    assert cube.location == (10.0, 2.0, 3.0)
+    assert cube.location == (10.0, 20.0, 30.0)
     assert result.outputs == {"object_name": "Cube"}

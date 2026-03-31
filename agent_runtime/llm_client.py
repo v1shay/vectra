@@ -8,18 +8,9 @@ from typing import Any
 import httpx
 
 from vectra.tools.registry import get_default_registry
+from vectra.utils.logging import get_vectra_logger, log_structured
 
 DEFAULT_TIMEOUT_SECONDS = 20.0
-OLLAMA_DISCOVERY_TIMEOUT_SECONDS = 2.0
-DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_API_KEY = "ollama"
-PREFERRED_OLLAMA_MODEL_HINTS = (
-    "qwen2.5-coder",
-    "deepseek-coder-v2",
-    "qwen",
-    "deepseek",
-    "coder",
-)
 
 
 class LLMClientError(Exception):
@@ -44,6 +35,9 @@ class LLMEndpointConfig:
     base_url: str
     api_key: str
     model: str
+
+
+_LLM_LOGGER = get_vectra_logger("vectra.runtime.llm")
 
 
 def _normalize_http_url(raw_url: str) -> str:
@@ -75,90 +69,30 @@ def _read_env_config(
     )
 
 
-def _ollama_root_url() -> str:
-    raw_url = os.getenv("OLLAMA_HOST", "").strip() or DEFAULT_OLLAMA_BASE_URL
-    normalized = _normalize_http_url(raw_url)
-    if normalized.endswith("/v1"):
-        return normalized[:-3]
-    return normalized
-
-
-def _select_ollama_model(model_names: list[str]) -> str | None:
-    if not model_names:
-        return None
-
-    lowered = [(model_name, model_name.lower()) for model_name in model_names]
-    for hint in PREFERRED_OLLAMA_MODEL_HINTS:
-        for model_name, lowered_name in lowered:
-            if hint in lowered_name:
-                return model_name
-    return model_names[0]
-
-
-def _discover_ollama_model(root_url: str) -> str | None:
-    try:
-        response = httpx.get(
-            f"{root_url}/api/tags",
-            timeout=OLLAMA_DISCOVERY_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except (httpx.HTTPError, ValueError):
-        return None
-
-    raw_models = payload.get("models", [])
-    if not isinstance(raw_models, list):
-        return None
-
-    model_names = [
-        model.get("name")
-        for model in raw_models
-        if isinstance(model, dict) and isinstance(model.get("name"), str)
-    ]
-    return _select_ollama_model(model_names)
-
-
-def _read_ollama_config() -> LLMEndpointConfig | None:
-    model = os.getenv("VECTRA_OLLAMA_MODEL", "").strip()
-    root_url = _ollama_root_url()
-    if not model:
-        model = _discover_ollama_model(root_url) or ""
-    if not model:
-        return None
-
-    api_key = os.getenv("OLLAMA_API_KEY", "").strip() or DEFAULT_OLLAMA_API_KEY
-    return LLMEndpointConfig(
-        name="ollama",
-        base_url=f"{root_url}/v1",
-        api_key=api_key,
-        model=model,
+def _primary_config() -> LLMEndpointConfig:
+    config = _read_env_config(
+        name="primary",
+        base_url_var="VECTRA_LLM_BASE_URL",
+        api_key_var="VECTRA_LLM_API_KEY",
+        model_var="VECTRA_LLM_MODEL",
     )
+    if config is None:
+        raise LLMConfigurationError(
+            "Missing primary LLM configuration. Set VECTRA_LLM_BASE_URL, "
+            "VECTRA_LLM_API_KEY, and VECTRA_LLM_MODEL."
+        )
+    return config
 
 
 def _available_configs() -> list[LLMEndpointConfig]:
-    configs = [
-        _read_env_config(
-            name="primary",
-            base_url_var="VECTRA_LLM_BASE_URL",
-            api_key_var="VECTRA_LLM_API_KEY",
-            model_var="VECTRA_LLM_MODEL",
-        ),
-        _read_env_config(
-            name="fallback",
-            base_url_var="VECTRA_LLM_FALLBACK_BASE_URL",
-            api_key_var="VECTRA_LLM_FALLBACK_API_KEY",
-            model_var="VECTRA_LLM_FALLBACK_MODEL",
-        ),
-        _read_ollama_config(),
-    ]
-    available = [config for config in configs if config is not None]
-    if available:
-        return available
-
-    raise LLMConfigurationError(
-        "Missing LLM configuration. Set VECTRA_LLM_* vars, or VECTRA_LLM_FALLBACK_* vars, "
-        "or run a local Ollama model."
+    primary = _primary_config()
+    fallback = _read_env_config(
+        name="fallback",
+        base_url_var="VECTRA_LLM_FALLBACK_BASE_URL",
+        api_key_var="VECTRA_LLM_FALLBACK_API_KEY",
+        model_var="VECTRA_LLM_FALLBACK_MODEL",
     )
+    return [primary] + ([fallback] if fallback is not None else [])
 
 
 def _tool_metadata() -> list[dict[str, Any]]:
@@ -185,8 +119,8 @@ def _format_tool_catalog() -> str:
             [
                 f"Tool: {tool['name']}",
                 f"- Meaning: {tool['description']}",
-                f"- Input schema: {json.dumps(tool['input_schema'], sort_keys=True)}",
-                f"- Output schema: {json.dumps(tool['output_schema'], sort_keys=True)}",
+                f"- Exact input schema: {json.dumps(tool['input_schema'], sort_keys=True)}",
+                f"- Exact output schema: {json.dumps(tool['output_schema'], sort_keys=True)}",
             ]
         )
     return "\n".join(lines)
@@ -195,129 +129,26 @@ def _format_tool_catalog() -> str:
 def _format_examples() -> str:
     examples = [
         {
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "move cube to x 10",
-            "output": [
-                {
-                    "action_id": "move_cube",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "location": [10, 0, 0],
-                    },
-                }
-            ],
-            "why": "Use the existing Cube and update only the x coordinate while keeping the other coordinates from the current scene state.",
-        },
-        {
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [3, 1, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "shift the cube right",
-            "output": [
-                {
-                    "action_id": "shift_cube",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "location": [5, 1, 0],
-                    },
-                }
-            ],
-            "why": "Right means a positive x move. When no distance is given, use a default relative step of 2 units and preserve y and z.",
-        },
-        {
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "put the cube at position 10 on x axis",
-            "output": [
-                {
-                    "action_id": "place_cube",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "location": [10, 0, 0],
-                    },
-                }
-            ],
-            "why": "An absolute x-axis instruction becomes a full location vector that keeps the current y and z values.",
-        },
-        {
-            "scene": {
-                "active_object": "Sphere",
-                "selected_objects": ["Sphere"],
-                "objects": [
-                    {
-                        "name": "Sphere",
-                        "location": [1, 2, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "slide it over",
-            "output": [
-                {
-                    "action_id": "slide_active_object",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Sphere",
-                        "location": [3, 2, 0],
-                    },
-                }
-            ],
-            "why": "Resolve 'it' to the active object, then apply a relative move using the current coordinates from scene state.",
-        },
-        {
+            "name": "Create cube at origin",
             "scene": {
                 "active_object": None,
                 "selected_objects": [],
                 "objects": [],
             },
-            "user": "make a sphere and put it at x 10",
+            "user": "create a cube",
             "output": [
                 {
-                    "action_id": "create_sphere",
+                    "action_id": "create_cube",
                     "tool": "mesh.create_primitive",
                     "params": {
-                        "primitive_type": "uv_sphere",
-                        "location": {"x": 10},
+                        "primitive_type": "cube",
+                        "location": [0, 0, 0],
                     },
                 }
             ],
-            "why": "If the user is creating a new basic shape and gives a placement at the same time, place it directly with the create action instead of adding an unnecessary transform step.",
         },
         {
+            "name": "Move forward on +Y",
             "scene": {
                 "active_object": "Cube",
                 "selected_objects": ["Cube"],
@@ -330,29 +161,176 @@ def _format_examples() -> str:
                     }
                 ],
             },
-            "user": "put cube at 5 0 0",
+            "user": "move cube forward 2",
             "output": [
                 {
-                    "action_id": "put_cube",
+                    "action_id": "move_cube_forward",
                     "tool": "object.transform",
                     "params": {
                         "object_name": "Cube",
-                        "location": [5, 0, 0],
+                        "location": [0, 2, 0],
                     },
                 }
             ],
-            "why": "A three-number position request becomes a full absolute location vector.",
+        },
+        {
+            "name": "Move backward on -Y",
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "move cube back 2",
+            "output": [
+                {
+                    "action_id": "move_cube_back",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "location": [0, -2, 0],
+                    },
+                }
+            ],
+        },
+        {
+            "name": "Move upward on +Z",
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "move cube up 3",
+            "output": [
+                {
+                    "action_id": "move_cube_up",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "location": [0, 0, 3],
+                    },
+                }
+            ],
+        },
+        {
+            "name": "Move downward on -Z",
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "move cube down 1",
+            "output": [
+                {
+                    "action_id": "move_cube_down",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "location": [0, 0, -1],
+                    },
+                }
+            ],
+        },
+        {
+            "name": "Unspecified rotation uses Z axis",
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "rotation_euler": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "rotate cube 45 degrees",
+            "output": [
+                {
+                    "action_id": "rotate_cube",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "rotation_euler": [0, 0, 0.785398],
+                    },
+                }
+            ],
+        },
+        {
+            "name": "Use $ref only when a later action depends on an earlier output",
+            "scene": {
+                "active_object": None,
+                "selected_objects": [],
+                "objects": [],
+            },
+            "user": "create a cube and move it forward 2",
+            "output": [
+                {
+                    "action_id": "create_cube",
+                    "tool": "mesh.create_primitive",
+                    "params": {
+                        "primitive_type": "cube",
+                        "location": [0, 0, 0],
+                    },
+                },
+                {
+                    "action_id": "move_cube",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": {"$ref": "create_cube.object_name"},
+                        "location": [0, 2, 0],
+                    },
+                },
+            ],
+        },
+        {
+            "name": "Ambiguous language must fail instead of guessing",
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "move cube somewhere weird",
+            "output": [],
         },
     ]
     rendered: list[str] = []
-    for index, example in enumerate(examples, start=1):
+    for example in examples:
         rendered.extend(
             [
-                f"Example {index}",
+                f"Example: {example['name']}",
                 f"- Scene: {json.dumps(example['scene'], sort_keys=True)}",
                 f"- User: {example['user']}",
                 f"- Valid output: {json.dumps(example['output'])}",
-                f"- Why valid: {example['why']}",
             ]
         )
     return "\n".join(rendered)
@@ -363,38 +341,35 @@ def _system_prompt() -> str:
     examples = _format_examples()
     return (
         "You are Vectra's semantic planner.\n"
-        "Your job is to convert a natural-language request plus scene state into a valid JSON array of structured actions.\n"
-        "You are not writing Python and you are not describing what to do in prose.\n"
-        "Return only a JSON array of actions.\n"
-        "Do not return markdown.\n"
-        "Do not explain your reasoning.\n"
-        "Each action must be an object with:\n"
-        '- optional "action_id" (unique string if present)\n'
-        '- required "tool" (must exactly match one listed tool name)\n'
-        '- required "params" (JSON object)\n'
-        "Use the fewest actions needed.\n"
-        "Prefer a valid action grounded in the available tools and scene state over returning an empty plan for a simple request.\n"
-        "Only return [] if the request truly cannot be expressed with the available tools.\n"
-        'Reference syntax must use JSON object form {"$ref": "action_id.output_key"}.\n'
-        "Never emit $ref(...) strings or any other shorthand.\n"
-        "Do not hallucinate tools, params, or outputs.\n"
-        "You may use $ref chaining only when the referenced action_id and output key exist in the listed tool output_schema.\n"
-        "Use scene_state.objects to resolve existing objects.\n"
-        "Prefer the active object first, then selected objects, then the closest exact scene object name.\n"
-        "If the user says 'cube', and an object named 'Cube' exists in scene_state.objects, use 'Cube' as object_name.\n"
-        "If the user says 'it', resolve 'it' to the active object first, then the only selected object.\n"
-        "location, rotation_euler, and scale are vectors in [x, y, z] order.\n"
-        "Optional params should be omitted when they are not needed. Prefer omission over null values or empty strings.\n"
-        "If the user specifies only one axis, preserve the other axes from the matched object's current transform in scene_state.objects.\n"
-        "For example, 'x 10' means [10, current_y, current_z].\n"
-        "If the user asks for a relative move like right, left, up, down, forward, or back without a number, convert it into a concrete vector by changing only the implied axis and using a default relative step of 2 Blender units.\n"
-        "A request to move or shift an existing object should usually use object.transform.\n"
-        "A request to create a new basic shape should usually use mesh.create_primitive.\n"
-        "If the user creates a new basic shape and provides an immediate placement, prefer setting mesh.create_primitive.location directly unless a later step truly depends on a prior action output.\n"
-        "Choose the closest supported primitive only when it matches the user's requested shape and no existing object is being targeted.\n"
+        "Convert the user request and scene_state into a valid JSON array of structured actions.\n"
+        "Return JSON array only. Do not return markdown. Do not explain. Do not add any text before or after the JSON.\n"
+        "Each action object must contain exactly these keys:\n"
+        '- optional "action_id" (unique non-empty string when present)\n'
+        '- required "tool"\n'
+        '- required "params"\n'
+        "No extra top-level keys are allowed.\n"
+        "Tool names must exactly match the tool catalog.\n"
+        "Params must match the tool schema exactly: no extra params, no missing required params, no nulls, no invented fields.\n"
+        "Spatial coordinate system is fixed and global:\n"
+        "- +X = right\n"
+        "- -X = left\n"
+        "- +Y = forward\n"
+        "- -Y = backward\n"
+        "- +Z = up\n"
+        "- -Z = down\n"
+        "Vector params must be explicit JSON arrays in [x, y, z] order.\n"
+        "Do not use axis maps like {\"x\": 1}. Use full arrays only.\n"
+        "If the user gives only one directional move, preserve the object's other coordinates from scene_state and output the final full vector.\n"
+        "If the user says rotate without an axis, use the Z axis.\n"
+        "Angles in rotation_euler must be radians.\n"
+        "Use [] when the request is ambiguous, unsupported, or cannot be grounded safely from scene_state.\n"
+        "Never guess hidden intent. Never fabricate coordinates for vague language like 'somewhere weird'.\n"
+        "Use $ref only in the exact form {\"$ref\":\"action_id.output_key\"}.\n"
+        "Only use $ref when the referenced action_id already exists earlier in the same array and the output_key exists in that tool's output schema.\n"
+        "If a user refers to an existing object, resolve it from scene_state.objects. Prefer exact name match, then active object, then the only selected object.\n"
         "Tool catalog:\n"
         f"{tool_catalog}\n"
-        "Illustrative examples. These teach the representation pattern and are not an exhaustive list of accepted phrases:\n"
+        "Examples:\n"
         f"{examples}"
     )
 
@@ -432,27 +407,11 @@ def _user_content(prompt: str, scene_state: dict[str, Any]) -> str:
     )
 
 
-def _messages(
-    prompt: str,
-    scene_state: dict[str, Any],
-    *,
-    invalid_response: str | None = None,
-    repair: bool = False,
-) -> list[dict[str, str]]:
-    messages = [
+def _messages(prompt: str, scene_state: dict[str, Any]) -> list[dict[str, str]]:
+    return [
         {"role": "system", "content": _system_prompt()},
         {"role": "user", "content": _user_content(prompt, scene_state)},
     ]
-    if invalid_response is not None:
-        messages.append({"role": "assistant", "content": invalid_response})
-    if repair:
-        messages.append(
-            {
-                "role": "user",
-                "content": "Return ONLY valid JSON array. No explanation.",
-            }
-        )
-    return messages
 
 
 def _extract_message_content(response_json: dict[str, Any]) -> str:
@@ -475,23 +434,9 @@ def _extract_message_content(response_json: dict[str, Any]) -> str:
     raise LLMResponseError("LLM response content must be a string")
 
 
-def _strip_markdown_fences(content: str) -> str:
-    stripped = content.strip()
-    if not stripped.startswith("```"):
-        return stripped
-
-    lines = stripped.splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].startswith("```"):
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
-
-
 def _parse_actions(content: str) -> list[dict[str, Any]]:
-    normalized = _strip_markdown_fences(content)
     try:
-        parsed = json.loads(normalized)
+        parsed = json.loads(content)
     except json.JSONDecodeError as exc:
         raise LLMResponseError(f"LLM returned invalid JSON: {exc.msg}") from exc
 
@@ -528,7 +473,11 @@ def _request_content_for_config(
         raise LLMResponseError(f"LLM response body was not valid JSON for {config.name}") from exc
 
     content = _extract_message_content(payload)
-    print("RAW LLM OUTPUT:", content)
+    log_structured(
+        _LLM_LOGGER,
+        "llm_raw_output",
+        {"provider": config.name, "content": content},
+    )
     return content
 
 
@@ -537,24 +486,14 @@ def _request_actions_for_config(
     prompt: str,
     scene_state: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    messages = _messages(prompt, scene_state)
-    content = _request_content_for_config(config, messages)
-    try:
-        return _parse_actions(content)
-    except LLMResponseError as first_exc:
-        repair_messages = _messages(
-            prompt,
-            scene_state,
-            invalid_response=content,
-            repair=True,
-        )
-        repair_content = _request_content_for_config(config, repair_messages)
-        try:
-            return _parse_actions(repair_content)
-        except LLMResponseError as repair_exc:
-            raise LLMResponseError(
-                f"{first_exc}; repair failed: {repair_exc}"
-            ) from repair_exc
+    content = _request_content_for_config(config, _messages(prompt, scene_state))
+    actions = _parse_actions(content)
+    log_structured(
+        _LLM_LOGGER,
+        "llm_parsed_json",
+        {"provider": config.name, "actions": actions},
+    )
+    return actions
 
 
 def _request_actions(prompt: str, scene_state: dict[str, Any]) -> list[dict[str, Any]]:

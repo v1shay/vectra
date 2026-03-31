@@ -17,7 +17,11 @@ class FakeContext:
 class FakeCreatePrimitiveTool(BaseTool):
     name = "mesh.create_primitive"
     description = "Fake create primitive tool"
-    input_schema = {}
+    input_schema = {
+        "primitive_type": {"type": "string", "required": True},
+        "name": {"type": "string", "required": False},
+        "location": {"type": "vector3", "required": False},
+    }
 
     def validate_params(self, params: dict[str, object]) -> dict[str, object]:
         params = super().validate_params(params)
@@ -38,7 +42,10 @@ class FakeCreatePrimitiveTool(BaseTool):
 class FakeTransformTool(BaseTool):
     name = "object.transform"
     description = "Fake transform tool"
-    input_schema = {}
+    input_schema = {
+        "object_name": {"type": "string", "required": True},
+        "location": {"type": "vector3", "required": False},
+    }
 
     def validate_params(self, params: dict[str, object]) -> dict[str, object]:
         params = super().validate_params(params)
