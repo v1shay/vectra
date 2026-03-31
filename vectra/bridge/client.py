@@ -29,6 +29,18 @@ def _normalize_base_url(base_url: str) -> str:
     return base_url.rstrip("/")
 
 
+def _format_connection_reason(reason: object) -> str:
+    if isinstance(reason, socket.timeout):
+        return "timed out"
+    if isinstance(reason, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(reason, OSError):
+        detail = getattr(reason, "strerror", None)
+        if detail:
+            return str(detail)
+    return str(reason)
+
+
 def _decode_json_response(response: Any) -> dict[str, Any]:
     try:
         data = json.loads(response.read().decode("utf-8"))
@@ -41,11 +53,13 @@ def _decode_json_response(response: Any) -> dict[str, Any]:
     return data
 
 
-def _handle_url_error(exc: error.URLError) -> None:
+def _handle_url_error(exc: error.URLError, *, url: str) -> None:
     reason = exc.reason
     if isinstance(reason, socket.timeout):
-        raise BridgeTimeoutError("Backend request timed out") from exc
-    raise BridgeConnectionError("Failed to connect to backend") from exc
+        raise BridgeTimeoutError(f"Backend request timed out for {url}") from exc
+    raise BridgeConnectionError(
+        f"Failed to connect to backend at {url}: {_format_connection_reason(reason)}"
+    ) from exc
 
 
 def _request_json(
@@ -68,6 +82,7 @@ def _request_json(
         headers=headers,
         method=method,
     )
+    request_url = req.full_url
 
     try:
         with request.urlopen(req, timeout=timeout) as response:
@@ -77,9 +92,9 @@ def _request_json(
     except error.HTTPError as exc:
         raise BridgeResponseError(f"Backend returned HTTP {exc.code}") from exc
     except error.URLError as exc:
-        _handle_url_error(exc)
+        _handle_url_error(exc, url=request_url)
     except TimeoutError as exc:
-        raise BridgeTimeoutError("Backend request timed out") from exc
+        raise BridgeTimeoutError(f"Backend request timed out for {request_url}") from exc
 
 
 def health_check(base_url: str = DEFAULT_BASE_URL, timeout: float = 2.0) -> dict[str, Any]:
