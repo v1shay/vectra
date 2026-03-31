@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+import sys
 from typing import Any
 
 from .base import BaseTool
@@ -61,6 +62,10 @@ class ToolRegistry:
     def list_tools(self) -> list[str]:
         return sorted(self._tools)
 
+    def reset(self) -> None:
+        self._tools.clear()
+        self._discovered_modules.clear()
+
     def discover(self) -> None:
         package_name = __name__.rsplit(".", 1)[0]
         package = importlib.import_module(package_name)
@@ -70,7 +75,11 @@ class ToolRegistry:
                 continue
             if module_info.name in self._discovered_modules:
                 continue
-            importlib.import_module(module_info.name)
+            module = sys.modules.get(module_info.name)
+            if module is None:
+                importlib.import_module(module_info.name)
+            else:
+                importlib.reload(module)
             self._discovered_modules.add(module_info.name)
 
         for tool_name, tool_cls in _TOOL_CLASS_CATALOG.items():
@@ -78,8 +87,20 @@ class ToolRegistry:
                 self.register(tool_cls)
 
 
-_DEFAULT_REGISTRY = ToolRegistry()
+_DEFAULT_REGISTRY: ToolRegistry | None = None
 
 
 def get_default_registry() -> ToolRegistry:
+    global _DEFAULT_REGISTRY
+
+    if _DEFAULT_REGISTRY is None:
+        _DEFAULT_REGISTRY = ToolRegistry()
+    return _DEFAULT_REGISTRY
+
+
+def reset_default_registry() -> ToolRegistry:
+    global _DEFAULT_REGISTRY
+
+    _TOOL_CLASS_CATALOG.clear()
+    _DEFAULT_REGISTRY = ToolRegistry()
     return _DEFAULT_REGISTRY

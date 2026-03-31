@@ -21,7 +21,11 @@ class KernelContext:
 class KernelCreatePrimitiveTool(BaseTool):
     name = "mesh.create_primitive"
     description = "Kernel integration test create tool"
-    input_schema = {}
+    input_schema = {
+        "primitive_type": {"type": "string", "required": True},
+        "name": {"type": "string", "required": False},
+        "location": {"type": "vector3", "required": False},
+    }
 
     def validate_params(self, params: dict[str, object]) -> dict[str, object]:
         params = super().validate_params(params)
@@ -39,7 +43,10 @@ class KernelCreatePrimitiveTool(BaseTool):
 class KernelTransformTool(BaseTool):
     name = "object.transform"
     description = "Kernel integration test transform tool"
-    input_schema = {}
+    input_schema = {
+        "object_name": {"type": "string", "required": True},
+        "location": {"type": "vector3", "required": False},
+    }
 
     def validate_params(self, params: dict[str, object]) -> dict[str, object]:
         params = super().validate_params(params)
@@ -96,6 +103,7 @@ def _create_payload(monkeypatch) -> dict[str, object]:
         runtime_main,
         "plan",
         lambda prompt, scene_state: PlannerResult(
+            status="ok",
             actions=KERNEL_ACTIONS,
             message=f"planned for {prompt}:{scene_state.get('current_frame', 'missing')}",
         ),

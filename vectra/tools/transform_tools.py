@@ -15,7 +15,7 @@ from .registry import register_tool
 @register_tool
 class TransformObjectTool(BaseTool):
     name = "object.transform"
-    description = "Apply deterministic object transforms"
+    description = "Move, rotate, or scale an existing object that is already present in the scene."
     input_schema = {
         "object_name": {"type": "string", "required": True},
         "location": {"type": "vector3", "required": False},
@@ -30,10 +30,10 @@ class TransformObjectTool(BaseTool):
         params = super().validate_params(params)
 
         object_name = params.get("object_name")
-        if not isinstance(object_name, str) or not object_name:
+        if not isinstance(object_name, str) or not object_name.strip():
             raise ToolValidationError("'object_name' must be a non-empty string")
 
-        normalized: dict[str, Any] = {"object_name": object_name}
+        normalized: dict[str, Any] = {"object_name": object_name.strip()}
         if "location" in params:
             normalized["location"] = _validate_vector3(params["location"], "location")
         if "rotation_euler" in params:

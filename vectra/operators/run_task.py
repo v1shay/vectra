@@ -8,7 +8,7 @@ import bpy
 
 from ..bridge.client import BridgeClientError, create_task
 from ..execution.engine import ExecutionEngine
-from ..utils.logging import get_vectra_logger
+from ..utils.logging import get_vectra_logger, log_structured
 
 logger = get_vectra_logger("vectra.blender")
 
@@ -60,8 +60,6 @@ def _set_phase(scene: bpy.types.Scene, phase: str) -> None:
 
 
 def _apply_ui_state(scene: bpy.types.Scene, *, status: str, phase: str) -> None:
-    print("VECTRA DEBUG: setting status =", status)
-    print("VECTRA DEBUG: setting phase =", phase)
     _set_phase(scene, phase)
     scene.vectra_status = status
 
@@ -128,15 +126,13 @@ def _poll_request_result() -> float | None:
         scene.vectra_request_in_flight = False
         if result_type == "success":
             response = payload
-            print("VECTRA DEBUG: backend response =", response)
+            log_structured(logger, "backend_response", response)
             actions = payload.get("actions", [])
-            print("VECTRA DEBUG: actions =", actions)
-            print("VECTRA DEBUG: actions type =", type(actions).__name__)
-            if actions:
+            response_status = str(payload.get("status", "error")).strip().lower()
+            planner_message = str(payload.get("message", "No actions returned")).strip()
+            if response_status == "ok" and actions:
                 try:
-                    print("VECTRA DEBUG: about to run execution engine")
                     report = _get_execution_engine().run(bpy.context, actions)
-                    print("VECTRA DEBUG: execution report =", report)
                 except Exception:  # pragma: no cover - defensive safeguard for Blender runtime
                     logger.exception("Unexpected Vectra execution failure")
                     _apply_ui_state(scene, status="Execution failed", phase="error")
@@ -148,16 +144,19 @@ def _poll_request_result() -> float | None:
                             phase="success",
                         )
                     else:
+                        failure_status = report.message or (
+                            f"Failed at {report.failed_action_id or 'unknown'}"
+                        )
                         _apply_ui_state(
                             scene,
-                            status=f"Failed at {report.failed_action_id or 'unknown'}",
+                            status=failure_status,
                             phase="error",
                         )
             else:
                 _apply_ui_state(
                     scene,
-                    status=f"No actions returned: {payload.get('message', 'No actions returned')}",
-                    phase="success",
+                    status=planner_message,
+                    phase="error",
                 )
         else:
             error_message = str(payload).strip() if payload is not None else "Connection failed"
@@ -170,11 +169,30 @@ def _poll_request_result() -> float | None:
 def cleanup_request_state() -> None:
     global _execution_engine, _request_queue
 
+    scene = _scene_from_name(_request_scene_name)
+    if scene is not None:
+        if hasattr(scene, "vectra_request_in_flight"):
+            scene.vectra_request_in_flight = False
+        if hasattr(scene, "vectra_phase") and scene.vectra_phase == "sending":
+            scene.vectra_phase = "idle"
+            if hasattr(scene, "vectra_status"):
+                scene.vectra_status = "Idle"
+
     _request_queue = None
     _execution_engine = None
     if _is_poll_timer_registered():
         bpy.app.timers.unregister(_poll_request_result)
     _finalize_request()
+
+
+def get_reload_block_reason() -> str | None:
+    if _request_thread is not None and _request_thread.is_alive():
+        return "Cannot reload Vectra while a request worker thread is still running"
+    if _request_queue is not None:
+        return "Cannot reload Vectra while request cleanup is still pending"
+    if _is_poll_timer_registered():
+        return "Cannot reload Vectra while the request poll timer is still registered"
+    return None
 
 
 class VECTRA_OT_run_task(bpy.types.Operator):

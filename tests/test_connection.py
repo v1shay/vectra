@@ -30,6 +30,7 @@ def live_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         runtime_main,
         "plan",
         lambda prompt, scene_state: PlannerResult(
+            status="ok",
             actions=CREATE_CUBE_ACTIONS,
             message=f"planned for {prompt}:{scene_state.get('current_frame', 'missing')}",
         ),

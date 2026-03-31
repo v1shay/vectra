@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from vectra.tools.base import BaseTool, ToolExecutionResult
-from vectra.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
+from vectra.tools.registry import (
+    DuplicateToolError,
+    ToolNotFoundError,
+    ToolRegistry,
+    get_default_registry,
+    reset_default_registry,
+)
 
 
 class EchoTool(BaseTool):
@@ -63,3 +69,15 @@ def test_tool_registry_unknown_tool_lookup_raises_error() -> None:
 
     with pytest.raises(ToolNotFoundError):
         registry.get("missing.tool")
+
+
+def test_reset_default_registry_clears_catalog_and_discovers_fresh_tools() -> None:
+    reset_default_registry()
+    registry = get_default_registry()
+
+    assert registry.list_tools() == []
+
+    registry.discover()
+
+    assert "mesh.create_primitive" in registry.list_tools()
+    assert "object.transform" in registry.list_tools()

@@ -31,7 +31,25 @@ class BaseTool(ABC):
     def validate_params(self, params: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(params, dict):
             raise ToolValidationError("Tool params must be a dictionary")
-        return params
+
+        allowed_keys = set(self.input_schema)
+        unknown_keys = sorted(set(params) - allowed_keys)
+        if unknown_keys:
+            raise ToolValidationError(
+                f"Unknown param(s) for '{self.name}': {unknown_keys}"
+            )
+
+        missing_required = sorted(
+            key
+            for key, spec in self.input_schema.items()
+            if isinstance(spec, dict) and spec.get("required") and key not in params
+        )
+        if missing_required:
+            raise ToolValidationError(
+                f"Missing required param(s) for '{self.name}': {missing_required}"
+            )
+
+        return dict(params)
 
     @abstractmethod
     def execute(self, context: "bpy.types.Context | Any", params: dict[str, Any]) -> ToolExecutionResult:
