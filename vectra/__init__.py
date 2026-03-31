@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 try:
     import bpy
 except ModuleNotFoundError:  # pragma: no cover - exercised implicitly by tests
@@ -16,62 +18,28 @@ bl_info = {
 }
 
 if bpy is not None:
-    from .operators.run_task import VECTRA_OT_run_task, cleanup_request_state
-    from .tools.registry import get_default_registry
-    from .ui.panel import VECTRA_PT_panel
-
-    CLASSES = (
-        VECTRA_OT_run_task,
-        VECTRA_PT_panel,
-    )
+    from . import addon_loader
+    from .addon_bootstrap import current_dev_source_path, register_bootstrap_classes, unregister_bootstrap_classes
 
     def register() -> None:
-        get_default_registry().discover()
-        for cls in CLASSES:
-            bpy.utils.register_class(cls)
-
-        bpy.types.Scene.vectra_prompt = bpy.props.StringProperty(
-            name="Prompt",
-            description="Instruction sent to the local Vectra runtime",
-            default="",
-        )
-        bpy.types.Scene.vectra_status = bpy.props.StringProperty(
-            name="Status",
-            description="Latest Vectra runtime status",
-            default="Idle",
-        )
-        bpy.types.Scene.vectra_phase = bpy.props.StringProperty(
-            name="Phase",
-            description="Current Vectra request phase",
-            default="idle",
-        )
-        bpy.types.Scene.vectra_request_in_flight = bpy.props.BoolProperty(
-            name="Request In Flight",
-            description="Whether a Vectra runtime request is currently running",
-            default=False,
+        try:
+            addon_loader.deactivate_runtime(sys.modules[__name__], enforce_idle=False)
+        except addon_loader.RuntimeLoadError:
+            addon_loader.reset_loader_state()
+        unregister_bootstrap_classes()
+        register_bootstrap_classes()
+        addon_loader.activate_runtime(
+            sys.modules[__name__],
+            dev_source_path=current_dev_source_path(),
         )
 
     def unregister() -> None:
-        cleanup_request_state()
-
-        for attr_name in (
-            "vectra_request_in_flight",
-            "vectra_phase",
-            "vectra_status",
-            "vectra_prompt",
-        ):
-            if hasattr(bpy.types.Scene, attr_name):
-                delattr(bpy.types.Scene, attr_name)
-
-        for cls in reversed(CLASSES):
-            try:
-                bpy.utils.unregister_class(cls)
-            except RuntimeError:
-                pass
+        try:
+            addon_loader.deactivate_runtime(sys.modules[__name__], enforce_idle=False)
+        finally:
+            unregister_bootstrap_classes()
 
 else:
-    CLASSES = ()
-
     def register() -> None:
         raise RuntimeError("The Vectra Blender add-on can only be registered inside Blender")
 
