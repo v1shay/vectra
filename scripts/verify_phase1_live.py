@@ -21,22 +21,10 @@ from vectra.bridge.client import BridgeClientError, create_task, health_check
 DEFAULT_BACKEND_HOST = "127.0.0.1"
 DEFAULT_BACKEND_PORT = 8000
 DEFAULT_BLENDER_BIN = "/Applications/Blender.app/Contents/MacOS/Blender"
-REQUIRED_ENV_VARS = (
-    "VECTRA_LLM_BASE_URL",
-    "VECTRA_LLM_API_KEY",
-    "VECTRA_LLM_MODEL",
-)
 
 
 class VerificationError(RuntimeError):
     """Raised when live verification fails."""
-
-
-def _require_env_var(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise VerificationError(f"Missing required environment variable: {name}")
-    return value
 
 
 def _check_python_environment(python_bin: Path) -> None:
@@ -93,9 +81,6 @@ def _read_process_output(process: subprocess.Popen[str], sink: list[str]) -> Non
 
 
 def _start_backend(python_bin: Path, host: str, port: int) -> tuple[subprocess.Popen[str], list[str]]:
-    for env_var in REQUIRED_ENV_VARS:
-        _require_env_var(env_var)
-
     backend_env = os.environ.copy()
     backend_env["PYTHONUNBUFFERED"] = "1"
     backend = subprocess.Popen(
@@ -181,7 +166,7 @@ def _assert_live_backend_round_trip(base_url: str) -> None:
         raise VerificationError(f"Unexpected backend probe response: {probe_response}")
 
     message = str(probe_response.get("message", ""))
-    if "Missing primary LLM configuration" in message or "LLM request failed" in message:
+    if "Missing LLM configuration" in message or "LLM request failed" in message:
         raise VerificationError(f"Configured LLM is not usable: {probe_response}")
 
 

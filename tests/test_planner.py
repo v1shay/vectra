@@ -7,6 +7,7 @@ import agent_runtime.llm_client as llm_client_module
 import agent_runtime.planner as planner_module
 from agent_runtime.llm_client import (
     LLMConfigurationError,
+    LLMEndpointConfig,
     LLMResponseError,
     generate_actions,
 )
@@ -37,6 +38,11 @@ class FakeLLMResponse:
                 }
             ]
         }
+
+
+@pytest.fixture(autouse=True)
+def _disable_ollama_fallback_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(llm_client_module, "_read_ollama_config", lambda: None)
 
 
 def _configure_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,15 +176,87 @@ def test_generate_actions_falls_back_to_generic_secondary_provider(
     ]
 
 
-def test_generate_actions_requires_primary_config(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generate_actions_falls_back_to_local_ollama_when_primary_request_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_env(monkeypatch)
+    monkeypatch.setattr(
+        llm_client_module,
+        "_read_ollama_config",
+        lambda: LLMEndpointConfig(
+            name="ollama",
+            base_url="http://127.0.0.1:11434/v1",
+            api_key="ollama",
+            model="qwen2.5-coder:32b",
+        ),
+    )
+
+    requested_urls: list[str] = []
+
+    def fake_post(url: str, *args, **kwargs):
+        requested_urls.append(url)
+        if "testserver" in url:
+            raise httpx.HTTPStatusError(
+                "request failed",
+                request=httpx.Request("POST", url),
+                response=httpx.Response(403),
+            )
+        return FakeLLMResponse(
+            '[{"action_id":"create_cube","tool":"mesh.create_primitive","params":{"primitive_type":"cube","name":"VectraCube","location":[0,0,0]}}]'
+        )
+
+    monkeypatch.setattr("agent_runtime.llm_client.httpx.post", fake_post)
+
+    actions = generate_actions("create a cube", {})
+
+    assert actions == CREATE_CUBE_ACTIONS
+    assert requested_urls == [
+        "http://testserver/chat/completions",
+        "http://127.0.0.1:11434/v1/chat/completions",
+    ]
+
+
+def test_generate_actions_uses_local_ollama_when_primary_config_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("VECTRA_LLM_BASE_URL", raising=False)
     monkeypatch.delenv("VECTRA_LLM_API_KEY", raising=False)
     monkeypatch.delenv("VECTRA_LLM_MODEL", raising=False)
     monkeypatch.delenv("VECTRA_LLM_FALLBACK_BASE_URL", raising=False)
     monkeypatch.delenv("VECTRA_LLM_FALLBACK_API_KEY", raising=False)
     monkeypatch.delenv("VECTRA_LLM_FALLBACK_MODEL", raising=False)
+    monkeypatch.setattr(
+        llm_client_module,
+        "_read_ollama_config",
+        lambda: LLMEndpointConfig(
+            name="ollama",
+            base_url="http://127.0.0.1:11434/v1",
+            api_key="ollama",
+            model="qwen2.5-coder:32b",
+        ),
+    )
+    monkeypatch.setattr(
+        "agent_runtime.llm_client.httpx.post",
+        lambda *args, **kwargs: FakeLLMResponse(
+            '[{"action_id":"create_cube","tool":"mesh.create_primitive","params":{"primitive_type":"cube","name":"VectraCube","location":[0,0,0]}}]'
+        ),
+    )
 
-    with pytest.raises(LLMConfigurationError, match="Missing primary LLM configuration"):
+    actions = generate_actions("create a cube", {})
+
+    assert actions == CREATE_CUBE_ACTIONS
+
+
+def test_generate_actions_requires_some_usable_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VECTRA_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_MODEL", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_FALLBACK_BASE_URL", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_FALLBACK_API_KEY", raising=False)
+    monkeypatch.delenv("VECTRA_LLM_FALLBACK_MODEL", raising=False)
+    monkeypatch.setattr(llm_client_module, "_read_ollama_config", lambda: None)
+
+    with pytest.raises(LLMConfigurationError, match="Missing LLM configuration"):
         generate_actions("create a cube", {})
 
 
