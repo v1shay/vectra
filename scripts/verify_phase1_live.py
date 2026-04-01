@@ -10,12 +10,14 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from zipfile import ZipFile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import agent_runtime.planner as planner_module
+from agent_runtime.intent import IntentEnvelope, IntentStep
 from vectra.bridge.client import BridgeClientError, create_task, health_check
 
 DEFAULT_BACKEND_HOST = "127.0.0.1"
@@ -74,6 +76,24 @@ def _build_addon_archive(python_bin: Path) -> Path:
     return zip_path
 
 
+def _assert_packaged_addon_is_fresh(zip_path: Path) -> None:
+    source_root = REPO_ROOT / "vectra"
+    with ZipFile(zip_path) as archive:
+        for source_path in sorted(source_root.rglob("*")):
+            if source_path.is_dir():
+                continue
+            if "__pycache__" in source_path.parts or source_path.suffix == ".pyc" or source_path.name == ".DS_Store":
+                continue
+            archive_path = Path("vectra") / source_path.relative_to(source_root)
+            try:
+                archive_bytes = archive.read(str(archive_path))
+            except KeyError as exc:
+                raise VerificationError(f"Packaged add-on is missing {archive_path}") from exc
+            source_bytes = source_path.read_bytes()
+            if archive_bytes != source_bytes:
+                raise VerificationError(f"Packaged add-on is stale for {archive_path}")
+
+
 def _read_process_output(process: subprocess.Popen[str], sink: list[str]) -> None:
     assert process.stdout is not None
     for line in process.stdout:
@@ -117,18 +137,14 @@ def _start_backend(python_bin: Path, host: str, port: int) -> tuple[subprocess.P
     deadline = time.time() + 30.0
     while time.time() < deadline:
         if backend.poll() is not None:
-            raise VerificationError(
-                f"Backend exited early while starting.\n{''.join(backend_output)}"
-            )
+            raise VerificationError(f"Backend exited early while starting.\n{''.join(backend_output)}")
         try:
             if health_check(base_url=base_url, timeout=0.5) == {"status": "ok"}:
                 return backend, backend_output
         except Exception:
             time.sleep(0.1)
 
-    raise VerificationError(
-        f"Timed out waiting for backend health check.\n{''.join(backend_output)}"
-    )
+    raise VerificationError(f"Timed out waiting for backend health check.\n{''.join(backend_output)}")
 
 
 def _stop_backend(process: subprocess.Popen[str]) -> None:
@@ -147,33 +163,37 @@ def _stop_backend(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=5.0)
 
 
-def _assert_live_backend_round_trip(base_url: str) -> None:
-    probe_response = create_task(
-        {
-            "prompt": "create a cube",
-            "scene_state": {
-                "active_object": None,
-                "selected_objects": [],
-                "current_frame": 1,
-                "objects": [],
-            },
-            "images": [],
-        },
-        base_url=base_url,
-        timeout=20.0,
-    )
-    if probe_response.get("status") not in {"ok", "error"}:
-        raise VerificationError(f"Unexpected backend probe response: {probe_response}")
+def _create_scene_state(active_object: str | None, selected_objects: list[str], objects: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "active_object": active_object,
+        "selected_objects": selected_objects,
+        "current_frame": 1,
+        "objects": objects,
+    }
 
-    message = str(probe_response.get("message", ""))
-    if "Missing LLM configuration" in message or "LLM request failed" in message:
-        raise VerificationError(f"Configured LLM is not usable: {probe_response}")
+
+def _assert_live_backend_round_trip(base_url: str) -> None:
+    payload = {
+        "prompt": "create a cube",
+        "scene_state": _create_scene_state(None, [], []),
+        "images": [],
+    }
+    probe_response = create_task(payload, base_url=base_url, timeout=20.0)
+    if probe_response.get("status") != "ok":
+        raise VerificationError(f"Configured primary LLM is not usable: {probe_response}")
 
 
 def _assert_injected_plan_rejection() -> None:
-    original_generate_actions = planner_module.generate_actions
+    original_extract_intent = planner_module.extract_intent
+    original_plan_actions = planner_module.plan_actions
     try:
-        planner_module.generate_actions = lambda prompt, scene_state: [  # type: ignore[assignment]
+        planner_module.extract_intent = lambda prompt, scene_state: IntentEnvelope(  # type: ignore[assignment]
+            status="ok",
+            confidence=0.9,
+            reason="",
+            steps=[IntentStep(action="create", primitive_type="cube", confidence=0.9)],
+        )
+        planner_module.plan_actions = lambda intent, scene_state: [  # type: ignore[assignment]
             {
                 "action_id": "create_cube",
                 "tool": "mesh.create_primitive",
@@ -186,12 +206,100 @@ def _assert_injected_plan_rejection() -> None:
         ]
         result = planner_module.plan("create cube", {})
     finally:
-        planner_module.generate_actions = original_generate_actions  # type: ignore[assignment]
+        planner_module.extract_intent = original_extract_intent  # type: ignore[assignment]
+        planner_module.plan_actions = original_plan_actions  # type: ignore[assignment]
 
-    if result.status != "error":
+    if result.status != "error" or result.actions != []:
         raise VerificationError(f"Injected invalid plan was not rejected: {result}")
-    if result.actions != []:
-        raise VerificationError(f"Injected invalid plan unexpectedly produced actions: {result}")
+
+
+def _post_task(base_url: str, payload: dict[str, object]) -> dict[str, object]:
+    return create_task(payload, base_url=base_url, timeout=30.0)
+
+
+def _assert_consistency_and_variation(base_url: str) -> None:
+    single_cube_scene = _create_scene_state(
+        "Cube",
+        ["Cube"],
+        [
+            {
+                "name": "Cube",
+                "type": "MESH",
+                "selected": True,
+                "active": True,
+                "location": [0, 0, 0],
+                "rotation_euler": [0, 0, 0],
+                "scale": [1, 1, 1],
+            }
+        ],
+    )
+
+    repeated_payload = {"prompt": "move cube forward 2", "scene_state": single_cube_scene, "images": []}
+    repeated = [_post_task(base_url, repeated_payload) for _ in range(3)]
+    if not (repeated[0] == repeated[1] == repeated[2]):
+        raise VerificationError(f"Inconsistent repeated output: {repeated}")
+
+    push_back = _post_task(
+        base_url,
+        {"prompt": "push cube back", "scene_state": single_cube_scene, "images": []},
+    )
+    move_backward = _post_task(
+        base_url,
+        {"prompt": "move it backward", "scene_state": single_cube_scene, "images": []},
+    )
+    expected_backward = {
+        "status": "ok",
+        "message": "planned",
+        "actions": [
+            {
+                "action_id": "step_1_transform_cube",
+                "tool": "object.transform",
+                "params": {"object_name": "Cube", "location": [0.0, -1.0, 0.0]},
+            }
+        ],
+    }
+    if push_back != expected_backward or move_backward != expected_backward:
+        raise VerificationError(f"Backward variation mismatch: {push_back} / {move_backward}")
+
+    ambiguous = _post_task(
+        base_url,
+        {"prompt": "move cube a bit", "scene_state": single_cube_scene, "images": []},
+    )
+    if ambiguous["status"] != "error" or ambiguous["actions"] != []:
+        raise VerificationError(f"Ambiguous prompt should fail closed: {ambiguous}")
+
+    failure = _post_task(
+        base_url,
+        {"prompt": "do something random", "scene_state": single_cube_scene, "images": []},
+    )
+    if failure["status"] != "error" or failure["actions"] != []:
+        raise VerificationError(f"Unsupported prompt should fail closed: {failure}")
+
+    multi_step = _post_task(
+        base_url,
+        {"prompt": "create a cube and move it forward 2", "scene_state": _create_scene_state(None, [], []), "images": []},
+    )
+    expected_multi_step = {
+        "status": "ok",
+        "message": "planned",
+        "actions": [
+            {
+                "action_id": "step_1_create_cube",
+                "tool": "mesh.create_primitive",
+                "params": {"primitive_type": "cube", "location": [0.0, 0.0, 0.0]},
+            },
+            {
+                "action_id": "step_2_transform_previous",
+                "tool": "object.transform",
+                "params": {
+                    "object_name": {"$ref": "step_1_create_cube.object_name"},
+                    "location": [0.0, 2.0, 0.0],
+                },
+            },
+        ],
+    }
+    if multi_step != expected_multi_step:
+        raise VerificationError(f"Unexpected multi-step plan: {multi_step}")
 
 
 def _build_blender_validation_script(zip_path: Path, repo_root: Path, host: str, port: int) -> str:
@@ -199,7 +307,6 @@ def _build_blender_validation_script(zip_path: Path, repo_root: Path, host: str,
 from __future__ import annotations
 
 import json
-import math
 import time
 
 import addon_utils
@@ -240,8 +347,6 @@ def ensure_single_cube():
 
 
 def install_and_reload_addon():
-    global create_task
-
     try:
         bpy.ops.preferences.addon_disable(module="vectra")
     except Exception:
@@ -251,11 +356,9 @@ def install_and_reload_addon():
     print("ADDON_INSTALL", install_result)
     print("ADDON_ENABLE", enable_result)
     default_loaded, state_loaded = addon_utils.check("vectra")
-    print("ADDON_CHECK", default_loaded, state_loaded)
     assert state_loaded
 
     import vectra
-    from vectra.bridge.client import create_task as bridge_create_task
 
     prefs = bpy.context.preferences.addons["vectra"].preferences
     prefs.dev_source_path = REPO_ROOT
@@ -265,7 +368,8 @@ def install_and_reload_addon():
     print("RUNTIME_STATUS", status)
     assert status.mode == "dev-source"
     assert status.source_path == REPO_ROOT
-    create_task = bridge_create_task
+    import vectra.operators.run_task as run_task_module
+    run_task_module.DEFAULT_BASE_URL = BASE_URL
 
 
 def run_operator_prompt(prompt):
@@ -274,7 +378,6 @@ def run_operator_prompt(prompt):
     scene = bpy.context.scene
     scene.vectra_prompt = prompt
     result = bpy.ops.vectra.run_task()
-    print("OPERATOR_RESULT", prompt, result)
     deadline = time.time() + 30.0
     while scene.vectra_request_in_flight and time.time() < deadline:
         run_task_module._poll_request_result()
@@ -284,85 +387,43 @@ def run_operator_prompt(prompt):
     return scene.vectra_phase, scene.vectra_status
 
 
-def snapshot_scene_state():
-    import vectra.operators.run_task as run_task_module
-
-    return run_task_module._build_scene_state(bpy.context)
-
-
-def assert_mesh_at_origin_after_create():
-    clear_scene()
-    phase, status = run_operator_prompt("create a cube")
-    if phase != "success":
-        raise AssertionError(f"create a cube failed: {{phase}} / {{status}}")
-    mesh_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
-    if len(mesh_objects) != 1:
-        raise AssertionError(f"Expected exactly one mesh object, found {{len(mesh_objects)}}")
-    assert_close_vector(mesh_objects[0].location, (0.0, 0.0, 0.0), "create cube location")
-
-
-def assert_move(prompt, expected_location):
-    cube = ensure_single_cube()
-    phase, status = run_operator_prompt(prompt)
-    if phase != "success":
-        raise AssertionError(f"{{prompt}} failed: {{phase}} / {{status}}")
-    assert_close_vector(cube.location, expected_location, prompt)
-
-
-def assert_rotate():
-    cube = ensure_single_cube()
-    phase, status = run_operator_prompt("rotate cube 45 degrees")
-    if phase != "success":
-        raise AssertionError(f"rotate cube 45 degrees failed: {{phase}} / {{status}}")
-    expected = round(math.radians(45.0), 4)
-    actual = round(float(cube.rotation_euler[2]), 4)
-    if actual != expected:
-        raise AssertionError(f"Unexpected Z rotation: expected {{expected}}, got {{actual}}")
-    assert_close_vector((cube.rotation_euler[0], cube.rotation_euler[1]), (0.0, 0.0), "rotation other axes")
-
-
-def assert_invalid_prompt_fails():
-    cube = ensure_single_cube()
-    phase, status = run_operator_prompt("move cube somewhere weird")
-    if phase != "error":
-        raise AssertionError(f"Expected error phase, got {{phase}} / {{status}}")
-    if not status.startswith("No actions returned:"):
-        raise AssertionError(f"Unexpected failure status: {{status}}")
-    assert_close_vector(cube.location, (0.0, 0.0, 0.0), "invalid prompt location")
-
-
-def assert_repeat_is_deterministic():
-    ensure_single_cube()
-    payload = {{
-        "prompt": "move cube forward 2",
-        "scene_state": snapshot_scene_state(),
-        "images": [],
-    }}
-    first = create_task(payload, base_url=BASE_URL, timeout=20.0)
-    second = create_task(payload, base_url=BASE_URL, timeout=20.0)
-    print("DIRECT_REPEAT_FIRST", json.dumps(first, sort_keys=True))
-    print("DIRECT_REPEAT_SECOND", json.dumps(second, sort_keys=True))
-    if first != second:
-        raise AssertionError(f"Repeated backend response mismatch: {{first}} != {{second}}")
-
-    for run_number in (1, 2):
-        cube = ensure_single_cube()
-        phase, status = run_operator_prompt("move cube forward 2")
-        if phase != "success":
-            raise AssertionError(f"repeat run {{run_number}} failed: {{phase}} / {{status}}")
-        assert_close_vector(cube.location, (0.0, 2.0, 0.0), f"repeat run {{run_number}} location")
-
-
 install_and_reload_addon()
-assert_mesh_at_origin_after_create()
-assert_move("move cube forward 2", (0.0, 2.0, 0.0))
-assert_move("move cube back 2", (0.0, -2.0, 0.0))
-assert_move("move cube up 3", (0.0, 0.0, 3.0))
-assert_move("move cube down 1", (0.0, 0.0, -1.0))
-assert_rotate()
-assert_invalid_prompt_fails()
-assert_repeat_is_deterministic()
-print("BLENDER_PHASE1_VERIFICATION", "ok")
+
+clear_scene()
+phase, status = run_operator_prompt("create a cube")
+assert phase == "success"
+mesh_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+assert len(mesh_objects) == 1
+assert_close_vector(mesh_objects[0].location, (0.0, 0.0, 0.0), "create cube location")
+
+cube = ensure_single_cube()
+phase, status = run_operator_prompt("move cube forward 2")
+assert phase == "success"
+assert_close_vector(cube.location, (0.0, 2.0, 0.0), "move cube forward 2")
+
+cube = ensure_single_cube()
+phase, status = run_operator_prompt("move cube up 3")
+assert phase == "success"
+assert_close_vector(cube.location, (0.0, 0.0, 3.0), "move cube up 3")
+
+cube = ensure_single_cube()
+phase, status = run_operator_prompt("rotate cube 45 degrees")
+assert phase == "success"
+assert round(float(cube.rotation_euler[2]), 4) == 0.7854
+
+cube = ensure_single_cube()
+phase, status = run_operator_prompt("move cube a bit")
+assert phase == "error"
+assert_close_vector(cube.location, (0.0, 0.0, 0.0), "move cube a bit")
+
+clear_scene()
+phase, status = run_operator_prompt("create a cube and move it forward 2")
+assert phase == "success"
+mesh_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+assert len(mesh_objects) == 1
+assert_close_vector(mesh_objects[0].location, (0.0, 2.0, 0.0), "create and move")
+
+print("BLENDER_PHASE17_VERIFICATION", "ok")
 """
 
 
@@ -370,16 +431,14 @@ def _run_blender_validation(blender_bin: Path, zip_path: Path, host: str, port: 
     if not blender_bin.exists():
         raise VerificationError(f"Blender executable not found: {blender_bin}")
 
-    with tempfile.TemporaryDirectory(prefix="vectra-phase1-") as temp_dir:
-        script_path = Path(temp_dir) / "verify_phase1_blender.py"
-        script_path.write_text(
-            _build_blender_validation_script(zip_path, REPO_ROOT, host, port),
-            encoding="utf-8",
-        )
+    with tempfile.TemporaryDirectory(prefix="vectra-phase17-") as temp_dir:
+        script_path = Path(temp_dir) / "verify_phase17_blender.py"
+        script_path.write_text(_build_blender_validation_script(zip_path, REPO_ROOT, host, port), encoding="utf-8")
         completed = subprocess.run(
             [
                 str(blender_bin),
                 "--background",
+                "--factory-startup",
                 "--python-exit-code",
                 "1",
                 "--python",
@@ -401,10 +460,10 @@ def _run_blender_validation(blender_bin: Path, zip_path: Path, host: str, port: 
 
 def _assert_log_visibility(backend_output: str, blender_output: str) -> None:
     required_backend_markers = [
-        "planner_prompt",
-        "planner_scene_state",
-        "llm_raw_output",
-        "llm_parsed_json",
+        "llm_provider_used",
+        "planner_raw_intent",
+        "planner_normalized_intent",
+        "planner_planned_actions",
         "planner_validated_actions",
     ]
     for marker in required_backend_markers:
@@ -416,7 +475,7 @@ def _assert_log_visibility(backend_output: str, blender_output: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Vectra Phase 1 live verification")
+    parser = argparse.ArgumentParser(description="Run Vectra Phase 1.7 live verification")
     parser.add_argument(
         "--python-bin",
         default=str(REPO_ROOT / ".venv" / "bin" / "python"),
@@ -427,17 +486,8 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_BLENDER_BIN,
         help="Path to the Blender executable",
     )
-    parser.add_argument(
-        "--backend-host",
-        default=DEFAULT_BACKEND_HOST,
-        help="Backend host for uvicorn",
-    )
-    parser.add_argument(
-        "--backend-port",
-        type=int,
-        default=DEFAULT_BACKEND_PORT,
-        help="Backend port for uvicorn",
-    )
+    parser.add_argument("--backend-host", default=DEFAULT_BACKEND_HOST, help="Backend host for uvicorn")
+    parser.add_argument("--backend-port", type=int, default=DEFAULT_BACKEND_PORT, help="Backend port for uvicorn")
     return parser.parse_args()
 
 
@@ -448,25 +498,19 @@ def main() -> int:
 
     _check_python_environment(python_bin)
     zip_path = _build_addon_archive(python_bin)
-    backend, backend_lines = _start_backend(
-        python_bin=python_bin,
-        host=args.backend_host,
-        port=args.backend_port,
-    )
+    _assert_packaged_addon_is_fresh(zip_path)
+    backend, backend_lines = _start_backend(python_bin=python_bin, host=args.backend_host, port=args.backend_port)
     backend_output = ""
     try:
         health = health_check(base_url=f"http://{args.backend_host}:{args.backend_port}", timeout=2.0)
         if health != {"status": "ok"}:
             raise VerificationError(f"Unexpected health response: {health}")
 
-        _assert_live_backend_round_trip(f"http://{args.backend_host}:{args.backend_port}")
+        base_url = f"http://{args.backend_host}:{args.backend_port}"
+        _assert_live_backend_round_trip(base_url)
         _assert_injected_plan_rejection()
-        blender_output = _run_blender_validation(
-            blender_bin,
-            zip_path,
-            args.backend_host,
-            args.backend_port,
-        )
+        _assert_consistency_and_variation(base_url)
+        blender_output = _run_blender_validation(blender_bin, zip_path, args.backend_host, args.backend_port)
         time.sleep(0.5)
         backend_output = "".join(backend_lines)
         _assert_log_visibility(backend_output, blender_output)

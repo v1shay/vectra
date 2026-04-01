@@ -97,6 +97,8 @@ def _make_fake_bpy() -> ModuleType:
     fake_bpy.props = SimpleNamespace(
         StringProperty=lambda **kwargs: ("StringProperty", kwargs),
         BoolProperty=lambda **kwargs: ("BoolProperty", kwargs),
+        EnumProperty=lambda **kwargs: ("EnumProperty", kwargs),
+        IntProperty=lambda **kwargs: ("IntProperty", kwargs),
     )
     fake_bpy.utils = FakeUtils(fake_bpy.types)
     fake_bpy._subtype_registry = subtype_registry
@@ -148,6 +150,10 @@ def test_addon_runtime_register_unregister_cycle_is_reload_safe(
         "vectra_status",
         "vectra_phase",
         "vectra_request_in_flight",
+        "vectra_execution_mode",
+        "vectra_agent_transcript",
+        "vectra_pending_question",
+        "vectra_iteration",
     ):
         assert hasattr(fake_bpy.types.Scene, attribute_name)
 
@@ -169,6 +175,10 @@ def test_addon_runtime_register_unregister_cycle_is_reload_safe(
         "vectra_status",
         "vectra_phase",
         "vectra_request_in_flight",
+        "vectra_execution_mode",
+        "vectra_agent_transcript",
+        "vectra_pending_question",
+        "vectra_iteration",
     ):
         assert not hasattr(fake_bpy.types.Scene, attribute_name)
     assert registry_module.get_default_registry().list_tools() == []

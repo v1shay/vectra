@@ -124,3 +124,37 @@ def create_task(
     if not isinstance(data["actions"], list):
         raise BridgeResponseError("Task response field 'actions' must be a list")
     return data
+
+
+def create_agent_step(
+    payload: dict[str, Any],
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = DEFAULT_TASK_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    data = _request_json(
+        "POST",
+        "/agent/step",
+        base_url=base_url,
+        timeout=timeout,
+        payload=payload,
+    )
+
+    required_keys = {
+        "status",
+        "message",
+        "narration",
+        "understanding",
+        "plan",
+        "intended_actions",
+        "preferred_execution_mode",
+        "continue_loop",
+        "question",
+        "expected_outcome",
+        "execution",
+    }
+    missing = required_keys.difference(data)
+    if missing:
+        raise BridgeResponseError(f"Agent step response missing keys: {sorted(missing)}")
+    if not isinstance(data["execution"], dict):
+        raise BridgeResponseError("Agent step response field 'execution' must be an object")
+    return data
