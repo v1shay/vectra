@@ -232,7 +232,7 @@ def ensure_local_backend(
     if repo_root is None:
         raise BridgeConnectionError(
             f"{initial_error}. Vectra could not auto-start the backend because it could not find "
-            "a repo checkout with agent_runtime/. Set the Vectra Dev Source Path to the repo root "
+            "a repo checkout with agent_runtime/. Set the Vectra Development Source Path to the repo root "
             f"or start the backend manually with: {_manual_start_command(repo_root_hint, base_url)}"
         ) from initial_error
 

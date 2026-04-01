@@ -118,7 +118,7 @@ def resolve_dev_source_path(
     package_dir = repo_root / (package_dir_name or _PACKAGED_PACKAGE_DIR.name)
     init_file = package_dir / "__init__.py"
     if not package_dir.is_dir() or not init_file.is_file():
-        return None, f"Invalid Vectra dev source path: {repo_root}"
+        return None, f"Invalid Vectra development source path: {repo_root}"
     return repo_root, None
 
 
