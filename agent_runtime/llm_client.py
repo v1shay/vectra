@@ -10,10 +10,16 @@ import httpx
 from vectra.tools.registry import get_default_registry
 from vectra.utils.logging import get_vectra_logger, log_structured
 
+try:
+    from .intent import IntentEnvelope
+except ImportError:  # pragma: no cover - supports local module imports from agent_runtime/
+    from intent import IntentEnvelope
+
 DEFAULT_TIMEOUT_SECONDS = 20.0
 OLLAMA_DISCOVERY_TIMEOUT_SECONDS = 2.0
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_API_KEY = "ollama"
+DEFAULT_PROVIDER_CONFIDENCE = 0.35
 PREFERRED_OLLAMA_MODEL_HINTS = (
     "qwen2.5-coder",
     "deepseek-coder-v2",
@@ -71,12 +77,7 @@ def _read_env_config(
     model = os.getenv(model_var, "").strip()
     if not (base_url and api_key and model):
         return None
-    return LLMEndpointConfig(
-        name=name,
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-    )
+    return LLMEndpointConfig(name=name, base_url=base_url, api_key=api_key, model=model)
 
 
 def _primary_config() -> LLMEndpointConfig | None:
@@ -110,10 +111,7 @@ def _select_ollama_model(model_names: list[str]) -> str | None:
 
 def _discover_ollama_model(root_url: str) -> str | None:
     try:
-        response = httpx.get(
-            f"{root_url}/api/tags",
-            timeout=OLLAMA_DISCOVERY_TIMEOUT_SECONDS,
-        )
+        response = httpx.get(f"{root_url}/api/tags", timeout=OLLAMA_DISCOVERY_TIMEOUT_SECONDS)
         response.raise_for_status()
         payload = response.json()
     except (httpx.HTTPError, ValueError):
@@ -140,30 +138,22 @@ def _read_ollama_config() -> LLMEndpointConfig | None:
         return None
 
     api_key = os.getenv("OLLAMA_API_KEY", "").strip() or DEFAULT_OLLAMA_API_KEY
-    return LLMEndpointConfig(
-        name="ollama",
-        base_url=f"{root_url}/v1",
-        api_key=api_key,
-        model=model,
-    )
+    return LLMEndpointConfig(name="ollama", base_url=f"{root_url}/v1", api_key=api_key, model=model)
 
 
-def _available_configs() -> list[LLMEndpointConfig]:
+def _provider_chain() -> list[LLMEndpointConfig]:
     primary = _primary_config()
-    fallback = _read_env_config(
-        name="fallback",
-        base_url_var="VECTRA_LLM_FALLBACK_BASE_URL",
-        api_key_var="VECTRA_LLM_FALLBACK_API_KEY",
-        model_var="VECTRA_LLM_FALLBACK_MODEL",
-    )
-    ollama = _read_ollama_config()
-    available = [config for config in (primary, fallback, ollama) if config is not None]
-    if available:
-        return available
+    if primary is None:
+        raise LLMConfigurationError(
+            "Missing primary LLM configuration. Set VECTRA_LLM_BASE_URL, "
+            "VECTRA_LLM_API_KEY, and VECTRA_LLM_MODEL."
+        )
 
-    raise LLMConfigurationError(
-        "Missing LLM configuration. Set VECTRA_LLM_* vars or run a local Ollama model."
-    )
+    providers = [primary]
+    ollama = _read_ollama_config()
+    if ollama is not None:
+        providers.append(ollama)
+    return providers
 
 
 def _tool_metadata() -> list[dict[str, Any]]:
@@ -197,318 +187,61 @@ def _format_tool_catalog() -> str:
     return "\n".join(lines)
 
 
-def _format_examples() -> str:
-    examples = [
+def _intent_schema_description() -> str:
+    return json.dumps(
         {
-            "name": "Create cube at origin",
-            "scene": {
-                "active_object": None,
-                "selected_objects": [],
-                "objects": [],
-            },
-            "user": "create a cube",
-            "output": [
+            "status": "ok | no_action",
+            "confidence": "number between 0 and 1",
+            "reason": "string",
+            "steps": [
                 {
-                    "action_id": "create_cube",
-                    "tool": "mesh.create_primitive",
-                    "params": {
-                        "primitive_type": "cube",
-                        "location": [0, 0, 0],
-                    },
+                    "action": "create | transform",
+                    "target": "optional raw target phrase",
+                    "target_name": "optional exact object name when certain",
+                    "target_ref": (
+                        "optional reference type such as active_object, selected_object, "
+                        "previous_step"
+                    ),
+                    "primitive_type": "optional primitive name for create intents",
+                    "direction": "optional direction label",
+                    "magnitude": "optional numeric magnitude",
+                    "magnitude_qualifier": "optional vague magnitude phrase such as 'a bit' or 'a couple'",
+                    "transform_kind": "optional location | rotation | scale",
+                    "axis": "optional x | y | z",
+                    "confidence": "number between 0 and 1",
                 }
             ],
         },
-        {
-            "name": "Move forward on +Y",
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "move cube forward 2",
-            "output": [
-                {
-                    "action_id": "move_cube_forward",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "location": [0, 2, 0],
-                    },
-                }
-            ],
-        },
-        {
-            "name": "Colloquial reference can still resolve to the active object",
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "move this shit forward 2",
-            "output": [
-                {
-                    "action_id": "move_active_forward",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "location": [0, 2, 0],
-                    },
-                }
-            ],
-        },
-        {
-            "name": "Very informal shorthand can still refer to the active object when unique",
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "move ts forward 2",
-            "output": [
-                {
-                    "action_id": "move_active_forward",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "location": [0, 2, 0],
-                    },
-                }
-            ],
-        },
-        {
-            "name": "Move backward on -Y",
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "move cube back 2",
-            "output": [
-                {
-                    "action_id": "move_cube_back",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "location": [0, -2, 0],
-                    },
-                }
-            ],
-        },
-        {
-            "name": "Move upward on +Z",
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "move cube up 3",
-            "output": [
-                {
-                    "action_id": "move_cube_up",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "location": [0, 0, 3],
-                    },
-                }
-            ],
-        },
-        {
-            "name": "Move downward on -Z",
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "move cube down 1",
-            "output": [
-                {
-                    "action_id": "move_cube_down",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "location": [0, 0, -1],
-                    },
-                }
-            ],
-        },
-        {
-            "name": "Unspecified rotation uses Z axis",
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "rotation_euler": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "rotate cube 45 degrees",
-            "output": [
-                {
-                    "action_id": "rotate_cube",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": "Cube",
-                        "rotation_euler": [0, 0, 0.785398],
-                    },
-                }
-            ],
-        },
-        {
-            "name": "Use $ref only when a later action depends on an earlier output",
-            "scene": {
-                "active_object": None,
-                "selected_objects": [],
-                "objects": [],
-            },
-            "user": "create a cube and move it forward 2",
-            "output": [
-                {
-                    "action_id": "create_cube",
-                    "tool": "mesh.create_primitive",
-                    "params": {
-                        "primitive_type": "cube",
-                        "location": [0, 0, 0],
-                    },
-                },
-                {
-                    "action_id": "move_cube",
-                    "tool": "object.transform",
-                    "params": {
-                        "object_name": {"$ref": "create_cube.object_name"},
-                        "location": [0, 2, 0],
-                    },
-                },
-            ],
-        },
-        {
-            "name": "Ambiguous language must fail instead of guessing",
-            "scene": {
-                "active_object": "Cube",
-                "selected_objects": ["Cube"],
-                "objects": [
-                    {
-                        "name": "Cube",
-                        "location": [0, 0, 0],
-                        "selected": True,
-                        "active": True,
-                    }
-                ],
-            },
-            "user": "move cube somewhere weird",
-            "output": [],
-        },
-        {
-            "name": "Vague creation requests must fail instead of inventing geometry",
-            "scene": {
-                "active_object": None,
-                "selected_objects": [],
-                "objects": [],
-            },
-            "user": "make some shit",
-            "output": [],
-        },
-    ]
-    rendered: list[str] = []
-    for example in examples:
-        rendered.extend(
-            [
-                f"Example: {example['name']}",
-                f"- Scene: {json.dumps(example['scene'], sort_keys=True)}",
-                f"- User: {example['user']}",
-                f"- Valid output: {json.dumps(example['output'])}",
-            ]
-        )
-    return "\n".join(rendered)
+        indent=2,
+        sort_keys=True,
+    )
 
 
 def _system_prompt() -> str:
     tool_catalog = _format_tool_catalog()
-    examples = _format_examples()
     return (
-        "You are Vectra's semantic planner.\n"
-        "Convert the user request and scene_state into a valid JSON array of structured actions.\n"
-        "Return JSON array only. Do not return markdown. Do not explain. Do not add any text before or after the JSON.\n"
-        "Each action object must contain exactly these keys:\n"
-        '- optional "action_id" (unique non-empty string when present)\n'
-        '- required "tool"\n'
-        '- required "params"\n'
-        "No extra top-level keys are allowed.\n"
-        "Tool names must exactly match the tool catalog.\n"
-        "Params must match the tool schema exactly: no extra params, no missing required params, no nulls, no invented fields.\n"
-        "Spatial coordinate system is fixed and global:\n"
-        "- +X = right\n"
-        "- -X = left\n"
-        "- +Y = forward\n"
-        "- -Y = backward\n"
-        "- +Z = up\n"
-        "- -Z = down\n"
-        "Vector params must be explicit JSON arrays in [x, y, z] order.\n"
-        "Do not use axis maps like {\"x\": 1}. Use full arrays only.\n"
-        "If the user gives only one directional move, preserve the object's other coordinates from scene_state and output the final full vector.\n"
-        "If the user says rotate without an axis, use the Z axis.\n"
-        "Angles in rotation_euler must be radians.\n"
-        "Colloquial references like 'it', 'this', 'that', 'this thing', 'that thing', 'this object', "
-        "'this cube', 'this shit', and shorthand like 'ts' refer to the active object or only selected "
-        "object when the reference is unique in scene_state.\n"
-        "Profanity, slang, and casual phrasing do not change the underlying action semantics.\n"
-        "Use [] when the request is ambiguous, unsupported, or cannot be grounded safely from scene_state.\n"
-        "If the user does not specify a concrete operation or target, return [].\n"
-        "Never guess hidden intent. Never fabricate coordinates for vague language like 'somewhere weird'.\n"
-        "Use $ref only in the exact form {\"$ref\":\"action_id.output_key\"}.\n"
-        "Only use $ref when the referenced action_id already exists earlier in the same array and the output_key exists in that tool's output schema.\n"
-        "If a user refers to an existing object, resolve it from scene_state.objects. Prefer exact name match, then active object, then the only selected object.\n"
-        "Tool catalog:\n"
+        "You are Vectra's intent parser.\n"
+        "Convert the user request and scene_state into a high-level JSON intent object.\n"
+        "Return JSON object only. Do not return markdown. Do not explain. Do not produce actions.\n"
+        "The output must exactly match the documented intent schema.\n"
+        "Use status='no_action' with an empty steps list when the request is ambiguous, unsupported, "
+        "or unsafe to ground from scene_state.\n"
+        "Do not guess missing targets, directions, tools, or geometry.\n"
+        "Normalize requests into a compact semantic form:\n"
+        "- action=create only when the primitive is explicit and supported\n"
+        "- action=transform for movement, rotation, or scale adjustments\n"
+        "- transform_kind should be one of location, rotation, or scale\n"
+        "- direction should capture movement semantics like forward, backward, up, down, left, right\n"
+        "- if the user says 'into the ground', preserve that as a downward movement intent\n"
+        "- if the user gives vague magnitudes like 'a bit' or 'a couple', store them in magnitude_qualifier\n"
+        "- if the user refers to the active or selected object indirectly, use target_ref when appropriate\n"
+        "- if a later step refers to an object created earlier in the same request, use target_ref='previous_step'\n"
+        "- for rotation without an axis, prefer axis='z'\n"
+        "Only describe intent. The local planner will decide exact actions.\n"
+        "Supported tool catalog for downstream planning:\n"
         f"{tool_catalog}\n"
-        "Examples:\n"
-        f"{examples}"
+        "Intent schema:\n"
+        f"{_intent_schema_description()}"
     )
 
 
@@ -572,21 +305,26 @@ def _extract_message_content(response_json: dict[str, Any]) -> str:
     raise LLMResponseError("LLM response content must be a string")
 
 
-def _parse_actions(content: str) -> list[dict[str, Any]]:
+def _parse_intent(content: str) -> IntentEnvelope:
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError as exc:
         raise LLMResponseError(f"LLM returned invalid JSON: {exc.msg}") from exc
 
-    if not isinstance(parsed, list):
-        raise LLMResponseError("LLM response must be a JSON array")
-    return parsed
+    if not isinstance(parsed, dict):
+        raise LLMResponseError("LLM response must be a JSON object")
+
+    try:
+        return IntentEnvelope.model_validate(parsed)
+    except Exception as exc:
+        raise LLMResponseError(f"LLM response did not match the intent schema: {exc}") from exc
 
 
 def _request_content_for_config(
     config: LLMEndpointConfig,
     messages: list[dict[str, str]],
 ) -> str:
+    log_structured(_LLM_LOGGER, "llm_provider_attempt", {"provider": config.name, "model": config.model})
     try:
         response = httpx.post(
             f"{config.base_url}/chat/completions",
@@ -611,41 +349,44 @@ def _request_content_for_config(
         raise LLMResponseError(f"LLM response body was not valid JSON for {config.name}") from exc
 
     content = _extract_message_content(payload)
-    log_structured(
-        _LLM_LOGGER,
-        "llm_raw_output",
-        {"provider": config.name, "content": content},
-    )
+    log_structured(_LLM_LOGGER, "llm_provider_used", {"provider": config.name, "model": config.model})
+    log_structured(_LLM_LOGGER, "llm_raw_output", {"provider": config.name, "content": content})
     return content
 
 
-def _request_actions_for_config(
+def _request_intent_for_config(
     config: LLMEndpointConfig,
     prompt: str,
     scene_state: dict[str, Any],
-) -> list[dict[str, Any]]:
+) -> IntentEnvelope:
     content = _request_content_for_config(config, _messages(prompt, scene_state))
-    actions = _parse_actions(content)
+    intent = _parse_intent(content)
     log_structured(
         _LLM_LOGGER,
-        "llm_parsed_json",
-        {"provider": config.name, "actions": actions},
+        "llm_parsed_intent",
+        {"provider": config.name, "intent": intent.model_dump()},
     )
-    return actions
+    return intent
 
 
-def _request_actions(prompt: str, scene_state: dict[str, Any]) -> list[dict[str, Any]]:
+def extract_intent(prompt: str, scene_state: dict[str, Any]) -> IntentEnvelope:
     last_error: LLMClientError | None = None
-    for config in _available_configs():
+    for index, config in enumerate(_provider_chain()):
         try:
-            return _request_actions_for_config(config, prompt, scene_state)
+            return _request_intent_for_config(config, prompt, scene_state)
         except LLMClientError as exc:
             last_error = exc
+            is_primary = index == 0
+            if is_primary:
+                log_structured(
+                    _LLM_LOGGER,
+                    "llm_provider_failure",
+                    {"provider": config.name, "message": str(exc)},
+                    level="warning",
+                )
+                continue
+            break
 
     if last_error is None:  # pragma: no cover - defensive guard
         raise LLMRequestError("LLM request failed for all configured providers")
     raise last_error
-
-
-def generate_actions(prompt: str, scene_state: dict[str, Any]) -> list[dict[str, Any]]:
-    return _request_actions(prompt, scene_state)

@@ -7,9 +7,13 @@ from vectra.tools.registry import ToolRegistry, ToolRegistryError, get_default_r
 from vectra.utils.logging import get_vectra_logger, log_structured
 
 try:
-    from .llm_client import LLMClientError, generate_actions
+    from .action_planner import ActionPlanningError, plan_actions
+    from .intent import IntentEnvelope, normalize_intent
+    from .llm_client import LLMClientError, extract_intent
 except ImportError:  # pragma: no cover - supports local module imports from agent_runtime/
-    from llm_client import LLMClientError, generate_actions
+    from action_planner import ActionPlanningError, plan_actions
+    from intent import IntentEnvelope, normalize_intent
+    from llm_client import LLMClientError, extract_intent
 
 
 class PlannerValidationError(Exception):
@@ -26,6 +30,7 @@ class PlannerResult:
 _PLANNER_LOGGER = get_vectra_logger("vectra.runtime.planner")
 _ALLOWED_ACTION_KEYS = {"action_id", "tool", "params"}
 _ACTION_RESULT_STATUSES = {"ok", "error"}
+_MINIMUM_INTENT_CONFIDENCE = 0.35
 
 
 def _get_registry() -> ToolRegistry:
@@ -232,16 +237,30 @@ def plan(prompt: str, scene_state: dict[str, Any]) -> PlannerResult:
     log_structured(_PLANNER_LOGGER, "planner_prompt", {"prompt": normalized_prompt})
     log_structured(_PLANNER_LOGGER, "planner_scene_state", scene_state)
     try:
-        actions = generate_actions(normalized_prompt, scene_state)
-        validated_actions = _validate_actions(actions, registry)
+        raw_intent = extract_intent(normalized_prompt, scene_state)
+        log_structured(_PLANNER_LOGGER, "planner_raw_intent", raw_intent.model_dump())
+        normalized_intent = normalize_intent(
+            raw_intent,
+            prompt=normalized_prompt,
+            scene_state=scene_state,
+            minimum_confidence=_MINIMUM_INTENT_CONFIDENCE,
+        )
+        log_structured(_PLANNER_LOGGER, "planner_normalized_intent", normalized_intent.model_dump())
+        planned_actions = plan_actions(normalized_intent, scene_state=scene_state)
+        log_structured(_PLANNER_LOGGER, "planner_planned_actions", planned_actions)
+        validated_actions = _validate_actions(planned_actions, registry)
         log_structured(_PLANNER_LOGGER, "planner_validated_actions", validated_actions)
-    except (LLMClientError, PlannerValidationError) as exc:
+    except (LLMClientError, PlannerValidationError, ActionPlanningError) as exc:
         message = f"No actions returned: {exc}"
         log_structured(_PLANNER_LOGGER, "planner_error", {"message": message}, level="error")
         return PlannerResult(status="error", actions=[], message=message)
 
     if not validated_actions:
-        message = "No actions returned: planner returned an empty action list"
+        intent_reason = ""
+        if isinstance(normalized_intent, IntentEnvelope):
+            intent_reason = normalized_intent.reason.strip()
+        suffix = f": {intent_reason}" if intent_reason else ""
+        message = f"No actions returned: planner returned an empty action list{suffix}"
         log_structured(_PLANNER_LOGGER, "planner_error", {"message": message}, level="error")
         return PlannerResult(status="error", actions=[], message=message)
 
