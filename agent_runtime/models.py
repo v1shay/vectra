@@ -60,6 +60,7 @@ class ExecutionPayloadModel(BaseModel):
     actions: list[ActionModel] = Field(default_factory=list)
     code: str | None = None
     expected_outcome: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentStepResponse(BaseModel):
@@ -73,5 +74,6 @@ class AgentStepResponse(BaseModel):
     preferred_execution_mode: ExecutionMode = "vectra-dev"
     continue_loop: bool = False
     question: str | None = None
+    error: str | None = None
     expected_outcome: str = ""
     execution: ExecutionPayloadModel = Field(default_factory=ExecutionPayloadModel)

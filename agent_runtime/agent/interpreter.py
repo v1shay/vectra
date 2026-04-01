@@ -130,12 +130,13 @@ def interpret_reasoning(reasoning: ReasoningStep, context: AgentContext) -> Exec
     del context
     _get_registry()
 
-    fallback_actions = reasoning.metadata.get("fallback_actions")
-    if isinstance(fallback_actions, list):
-        actions = [dict(action) for action in fallback_actions if isinstance(action, dict)]
+    compiled_actions = reasoning.metadata.get("compiled_actions")
+    if isinstance(compiled_actions, list):
+        actions = [dict(action) for action in compiled_actions if isinstance(action, dict)]
     else:
         actions = _actions_from_text_steps(reasoning.intended_actions)
     console_code = reasoning.metadata.get("console_code")
+    execution_metadata = reasoning.metadata.get("execution_metadata", {})
 
     if reasoning.status in {"clarify", "error"}:
         return ExecutionInstruction(
@@ -143,6 +144,7 @@ def interpret_reasoning(reasoning: ReasoningStep, context: AgentContext) -> Exec
             summary=reasoning.narration or reasoning.expected_outcome,
             expected_outcome=reasoning.expected_outcome,
             signature=reasoning.status,
+            metadata=execution_metadata if isinstance(execution_metadata, dict) else {},
         )
 
     if not actions and (not isinstance(console_code, str) or not console_code.strip()):
@@ -151,6 +153,7 @@ def interpret_reasoning(reasoning: ReasoningStep, context: AgentContext) -> Exec
             summary=reasoning.narration or reasoning.expected_outcome,
             expected_outcome=reasoning.expected_outcome,
             signature="none",
+            metadata=execution_metadata if isinstance(execution_metadata, dict) else {},
         )
 
     if reasoning.preferred_execution_mode == "vectra-code":
@@ -165,6 +168,7 @@ def interpret_reasoning(reasoning: ReasoningStep, context: AgentContext) -> Exec
             code=code,
             expected_outcome=reasoning.expected_outcome,
             signature=signature,
+            metadata=execution_metadata if isinstance(execution_metadata, dict) else {},
         )
 
     signature = json.dumps({"kind": "tool_actions", "actions": actions}, sort_keys=True)
@@ -174,4 +178,5 @@ def interpret_reasoning(reasoning: ReasoningStep, context: AgentContext) -> Exec
         actions=actions,
         expected_outcome=reasoning.expected_outcome,
         signature=signature,
+        metadata=execution_metadata if isinstance(execution_metadata, dict) else {},
     )

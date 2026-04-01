@@ -7,13 +7,11 @@ from vectra.tools.registry import ToolRegistry, ToolRegistryError, get_default_r
 from vectra.utils.logging import get_vectra_logger, log_structured
 
 try:
-    from .action_planner import ActionPlanningError, plan_actions
-    from .intent import IntentEnvelope, normalize_intent
-    from .llm_client import LLMClientError, extract_intent
+    from .llm_client import LLMClientError
+    from .scene_pipeline import build_scene_pipeline
 except ImportError:  # pragma: no cover - supports local module imports from agent_runtime/
-    from action_planner import ActionPlanningError, plan_actions
-    from intent import IntentEnvelope, normalize_intent
-    from llm_client import LLMClientError, extract_intent
+    from llm_client import LLMClientError
+    from scene_pipeline import build_scene_pipeline
 
 
 class PlannerValidationError(Exception):
@@ -30,7 +28,6 @@ class PlannerResult:
 _PLANNER_LOGGER = get_vectra_logger("vectra.runtime.planner")
 _ALLOWED_ACTION_KEYS = {"action_id", "tool", "params"}
 _ACTION_RESULT_STATUSES = {"ok", "error"}
-_MINIMUM_INTENT_CONFIDENCE = 0.35
 
 
 def _get_registry() -> ToolRegistry:
@@ -237,30 +234,38 @@ def plan(prompt: str, scene_state: dict[str, Any]) -> PlannerResult:
     log_structured(_PLANNER_LOGGER, "planner_prompt", {"prompt": normalized_prompt})
     log_structured(_PLANNER_LOGGER, "planner_scene_state", scene_state)
     try:
-        raw_intent = extract_intent(normalized_prompt, scene_state)
-        log_structured(_PLANNER_LOGGER, "planner_raw_intent", raw_intent.model_dump())
-        normalized_intent = normalize_intent(
-            raw_intent,
-            prompt=normalized_prompt,
-            scene_state=scene_state,
-            minimum_confidence=_MINIMUM_INTENT_CONFIDENCE,
+        pipeline_result = build_scene_pipeline(
+            normalized_prompt,
+            scene_state,
+            max_construction_steps=None,
         )
-        log_structured(_PLANNER_LOGGER, "planner_normalized_intent", normalized_intent.model_dump())
-        planned_actions = plan_actions(normalized_intent, scene_state=scene_state)
-        log_structured(_PLANNER_LOGGER, "planner_planned_actions", planned_actions)
-        validated_actions = _validate_actions(planned_actions, registry)
+        if pipeline_result.scene_intent is not None:
+            log_structured(
+                _PLANNER_LOGGER,
+                "planner_scene_intent",
+                pipeline_result.scene_intent.model_dump(),
+            )
+        if pipeline_result.compiled_plan is not None:
+            log_structured(
+                _PLANNER_LOGGER,
+                "planner_compiled_actions",
+                pipeline_result.compiled_plan.actions,
+            )
+
+        if pipeline_result.status != "ok" or pipeline_result.compiled_plan is None:
+            message = f"No actions returned: {pipeline_result.message}"
+            log_structured(_PLANNER_LOGGER, "planner_error", {"message": message}, level="error")
+            return PlannerResult(status="error", actions=[], message=message)
+
+        validated_actions = _validate_actions(pipeline_result.compiled_plan.actions, registry)
         log_structured(_PLANNER_LOGGER, "planner_validated_actions", validated_actions)
-    except (LLMClientError, PlannerValidationError, ActionPlanningError) as exc:
+    except (LLMClientError, PlannerValidationError) as exc:
         message = f"No actions returned: {exc}"
         log_structured(_PLANNER_LOGGER, "planner_error", {"message": message}, level="error")
         return PlannerResult(status="error", actions=[], message=message)
 
     if not validated_actions:
-        intent_reason = ""
-        if isinstance(normalized_intent, IntentEnvelope):
-            intent_reason = normalized_intent.reason.strip()
-        suffix = f": {intent_reason}" if intent_reason else ""
-        message = f"No actions returned: planner returned an empty action list{suffix}"
+        message = "No actions returned: planner returned an empty action list"
         log_structured(_PLANNER_LOGGER, "planner_error", {"message": message}, level="error")
         return PlannerResult(status="error", actions=[], message=message)
 

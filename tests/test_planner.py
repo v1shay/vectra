@@ -5,14 +5,15 @@ import pytest
 
 import agent_runtime.llm_client as llm_client_module
 import agent_runtime.planner as planner_module
-from agent_runtime.intent import IntentEnvelope, IntentStep
+from agent_runtime.construction import CompiledConstructionPlan, ConstructionState
 from agent_runtime.llm_client import (
-    LLMConfigurationError,
-    LLMEndpointConfig,
-    LLMResponseError,
-    extract_intent,
+    LLMRequestError,
+    LLMTimeoutError,
+    extract_scene_intent,
 )
-from agent_runtime.planner import plan
+from agent_runtime.planner import PlannerResult, plan
+from agent_runtime.scene_intent import SceneEntity, SceneIntent
+from agent_runtime.scene_pipeline import ScenePipelineResult
 
 
 class FakeLLMResponse:
@@ -49,26 +50,28 @@ def _configure_primary_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VECTRA_LLM_BASE_URL", "https://api.mistral.ai/v1")
     monkeypatch.setenv("VECTRA_LLM_API_KEY", "test-key")
     monkeypatch.setenv("VECTRA_LLM_MODEL", "mistral-medium-latest")
+    monkeypatch.setenv("VECTRA_LLM_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("VECTRA_LLM_MAX_RETRIES", "2")
+    monkeypatch.setenv("VECTRA_LLM_SCENE_OBJECT_LIMIT", "10")
 
 
-def test_system_prompt_uses_schema_rules_without_phrase_examples() -> None:
+def test_system_prompt_uses_scene_intent_schema_without_tool_catalog() -> None:
     prompt = llm_client_module._system_prompt()
 
-    assert "Return JSON object only." in prompt
-    assert "Do not produce actions." in prompt
-    assert "target_ref='previous_step'" in prompt
-    assert "move this shit forward 2" not in prompt
-    assert "move ts forward 2" not in prompt
-    assert "make some shit" not in prompt
+    assert "SceneIntent schema" in prompt
+    assert "Do not emit tool calls." in prompt
+    assert "Supported tool catalog" not in prompt
 
 
-def test_user_content_emphasizes_scene_focus() -> None:
+def test_user_content_uses_compact_scene_summary_without_raw_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_primary_env(monkeypatch)
+    settings = llm_client_module.read_runtime_settings()
+
     content = llm_client_module._user_content(
         "slide it over",
         {
             "active_object": "Cube",
             "selected_objects": ["Cube"],
-            "current_frame": 12,
             "objects": [
                 {
                     "name": "Cube",
@@ -81,201 +84,156 @@ def test_user_content_emphasizes_scene_focus() -> None:
                 }
             ],
         },
+        settings=settings,
     )
 
-    assert "User request:\nslide it over" in content
-    assert "active_object: Cube" in content
-    assert "Scene objects summary:" in content
-    assert "Cube | type=MESH | active=True | selected=True" in content
-    assert "Raw scene_state JSON:" in content
+    assert "Compact object list:" in content
+    assert "Raw scene_state JSON" not in content
+    assert "name=Cube" in content
 
 
-def test_extract_intent_rejects_markdown_fences(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_extract_scene_intent_retries_timeout_exactly_twice(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_primary_env(monkeypatch)
-    monkeypatch.setattr(
-        "agent_runtime.llm_client.httpx.post",
-        lambda *args, **kwargs: FakeLLMResponse(
-            "```json\n"
-            '{"status":"ok","confidence":0.9,"reason":"","steps":[{"action":"create","primitive_type":"cube","confidence":0.9}]}\n'
-            "```"
-        ),
-    )
+    attempts: list[int] = []
 
-    with pytest.raises(LLMResponseError, match="LLM returned invalid JSON"):
-        extract_intent("create a cube", {})
-
-
-def test_extract_intent_logs_provider_usage_and_parsed_intent(monkeypatch: pytest.MonkeyPatch) -> None:
-    _configure_primary_env(monkeypatch)
-    logged: list[tuple[str, object]] = []
-
-    monkeypatch.setattr(
-        "agent_runtime.llm_client.httpx.post",
-        lambda *args, **kwargs: FakeLLMResponse(
-            '{"status":"ok","confidence":0.9,"reason":"","steps":[{"action":"create","primitive_type":"cube","confidence":0.9}]}'
-        ),
-    )
-    monkeypatch.setattr(
-        llm_client_module,
-        "log_structured",
-        lambda logger, event, payload, level="info": logged.append((event, payload)),
-    )
-
-    intent = extract_intent("create a cube", {})
-
-    assert intent == IntentEnvelope(
-        status="ok",
-        confidence=0.9,
-        reason="",
-        steps=[IntentStep(action="create", primitive_type="cube", confidence=0.9)],
-    )
-    assert any(event == "llm_provider_used" for event, _payload in logged)
-    assert any(event == "llm_parsed_intent" for event, _payload in logged)
-
-
-def test_extract_intent_falls_back_to_ollama_only_after_primary_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _configure_primary_env(monkeypatch)
-    monkeypatch.setattr(
-        llm_client_module,
-        "_read_ollama_config",
-        lambda: LLMEndpointConfig(
-            name="ollama",
-            base_url="http://127.0.0.1:11434/v1",
-            api_key="ollama",
-            model="qwen2.5-coder:32b",
-        ),
-    )
-
-    requested_urls: list[str] = []
-
-    def fake_post(url: str, *args, **kwargs):
-        requested_urls.append(url)
-        if "api.mistral.ai" in url:
-            raise httpx.ConnectError("primary unavailable")
+    def fake_post(*args, **kwargs):
+        del args, kwargs
+        attempts.append(len(attempts) + 1)
+        if len(attempts) < 3:
+            raise httpx.ReadTimeout("timed out")
         return FakeLLMResponse(
-            '{"status":"ok","confidence":0.82,"reason":"","steps":[{"action":"create","primitive_type":"cube","confidence":0.82}]}'
+            '{"status":"ok","confidence":0.9,"reasoning":"test","entities":[{"logical_id":"cube_pair","kind":"cube","quantity":2}]}'
         )
 
     monkeypatch.setattr("agent_runtime.llm_client.httpx.post", fake_post)
 
-    intent = extract_intent("create a cube", {})
+    intent = extract_scene_intent("make 2 cubes", {})
 
     assert intent.status == "ok"
-    assert requested_urls == [
-        "https://api.mistral.ai/v1/chat/completions",
-        "http://127.0.0.1:11434/v1/chat/completions",
+    assert attempts == [1, 2, 3]
+
+
+def test_extract_scene_intent_does_not_retry_http_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_primary_env(monkeypatch)
+    calls: list[int] = []
+
+    def fake_post(*args, **kwargs):
+        del args, kwargs
+        calls.append(1)
+        raise httpx.ConnectError("network down")
+
+    monkeypatch.setattr("agent_runtime.llm_client.httpx.post", fake_post)
+
+    with pytest.raises(LLMRequestError, match="network down"):
+        extract_scene_intent("make 2 cubes", {})
+
+    assert len(calls) == 1
+
+
+def test_extract_scene_intent_logs_timeout_and_completion_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_primary_env(monkeypatch)
+    events: list[str] = []
+
+    responses = [
+        httpx.ReadTimeout("timed out"),
+        FakeLLMResponse(
+            '{"status":"ok","confidence":0.9,"reasoning":"test","entities":[{"logical_id":"plane_left","kind":"plane","quantity":1}]}'
+        ),
     ]
 
+    def fake_post(*args, **kwargs):
+        del args, kwargs
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
-def test_extract_intent_requires_primary_configuration_even_if_ollama_exists(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("VECTRA_LLM_BASE_URL", raising=False)
-    monkeypatch.delenv("VECTRA_LLM_API_KEY", raising=False)
-    monkeypatch.delenv("VECTRA_LLM_MODEL", raising=False)
+    monkeypatch.setattr("agent_runtime.llm_client.httpx.post", fake_post)
     monkeypatch.setattr(
         llm_client_module,
-        "_read_ollama_config",
-        lambda: LLMEndpointConfig(
-            name="ollama",
-            base_url="http://127.0.0.1:11434/v1",
-            api_key="ollama",
-            model="qwen2.5-coder:32b",
-        ),
+        "log_structured",
+        lambda logger, event, payload, level="info": events.append(event),
     )
 
-    with pytest.raises(LLMConfigurationError, match="Missing primary LLM configuration"):
-        extract_intent("create a cube", {})
+    extract_scene_intent("make a plane", {})
+
+    assert "llm_request_started" in events
+    assert "llm_request_timed_out" in events
+    assert "llm_request_completed" in events
 
 
-def test_plan_returns_safe_failure_on_invalid_llm_json(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_extract_scene_intent_timeout_surfaces_structured_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_primary_env(monkeypatch)
+
+    monkeypatch.setattr(
+        "agent_runtime.llm_client.httpx.post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("timed out")),
+    )
+
+    with pytest.raises(LLMTimeoutError, match="timed out"):
+        extract_scene_intent("make 2 cubes", {})
+
+
+def test_plan_returns_safe_failure_when_pipeline_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         planner_module,
-        "extract_intent",
-        lambda prompt, scene_state: (_ for _ in ()).throw(
-            LLMResponseError("LLM returned invalid JSON: Expecting value")
+        "build_scene_pipeline",
+        lambda prompt, scene_state, max_construction_steps=None: ScenePipelineResult(
+            status="error",
+            message="scene intent parse failed",
+            prompt=prompt,
+            error="scene intent parse failed",
         ),
     )
 
     result = plan("create a cube", {})
 
-    assert result.status == "error"
-    assert result.actions == []
-    assert result.message == "No actions returned: LLM returned invalid JSON: Expecting value"
-
-
-def test_plan_handles_blank_prompt_safely() -> None:
-    result = plan("   ", {})
-
-    assert result.status == "error"
-    assert result.actions == []
-    assert result.message == "No actions returned: empty prompt"
-
-
-def test_plan_rejects_unknown_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        planner_module,
-        "extract_intent",
-        lambda prompt, scene_state: IntentEnvelope(
-            status="ok",
-            confidence=0.9,
-            reason="",
-            steps=[IntentStep(action="create", primitive_type="cube", confidence=0.9)],
-        ),
-    )
-    monkeypatch.setattr(
-        planner_module,
-        "plan_actions",
-        lambda intent, scene_state: [{"action_id": "x", "tool": "missing.tool", "params": {}}],
+    assert result == PlannerResult(
+        status="error",
+        actions=[],
+        message="No actions returned: scene intent parse failed",
     )
 
-    result = plan("create cube", {})
 
-    assert result.status == "error"
-    assert result.actions == []
-    assert result.message == "No actions returned: Unknown tool 'missing.tool'"
+def test_plan_accepts_valid_compiled_actions(monkeypatch: pytest.MonkeyPatch) -> None:
+    compiled_plan = CompiledConstructionPlan(
+        actions=[
+            {
+                "action_id": "create_cube_1",
+                "tool": "mesh.create_primitive",
+                "params": {
+                    "primitive_type": "cube",
+                    "name": "Cube_1",
+                    "location": [0.0, 0.0, 0.0],
+                },
+            }
+        ],
+        state=ConstructionState(),
+        steps=[],
+        affected_logical_ids=["cube_pair_1"],
+        affected_group_ids=["group_cube_pair"],
+        continue_loop=False,
+        expected_outcome="Scene intent is fully satisfied.",
+    )
 
-
-def test_plan_accepts_valid_multi_step_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         planner_module,
-        "extract_intent",
-        lambda prompt, scene_state: IntentEnvelope(
+        "build_scene_pipeline",
+        lambda prompt, scene_state, max_construction_steps=None: ScenePipelineResult(
             status="ok",
-            confidence=0.9,
-            reason="",
-            steps=[
-                IntentStep(action="create", primitive_type="cube", confidence=0.9),
-                IntentStep(
-                    action="transform",
-                    target_ref="previous_step",
-                    direction="forward",
-                    magnitude=2,
-                    transform_kind="location",
-                    confidence=0.88,
-                ),
-            ],
+            message="planned",
+            prompt=prompt,
+            scene_intent=SceneIntent(
+                status="ok",
+                confidence=0.9,
+                reasoning="test",
+                entities=[SceneEntity(logical_id="cube_pair", kind="cube", quantity=1)],
+            ),
+            compiled_plan=compiled_plan,
         ),
     )
 
-    result = plan("create a cube and move it forward 2", {})
+    result = plan("create a cube", {})
 
     assert result.status == "ok"
-    assert result.message == "planned"
-    assert result.actions == [
-        {
-            "action_id": "step_1_create_cube",
-            "tool": "mesh.create_primitive",
-            "params": {"primitive_type": "cube", "location": [0.0, 0.0, 0.0]},
-        },
-        {
-            "action_id": "step_2_transform_previous",
-            "tool": "object.transform",
-            "params": {
-                "object_name": {"$ref": "step_1_create_cube.object_name"},
-                "location": [0.0, 2.0, 0.0],
-            },
-        },
-    ]
+    assert result.actions == compiled_plan.actions

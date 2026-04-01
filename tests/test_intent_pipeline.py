@@ -1,238 +1,202 @@
 from __future__ import annotations
 
-import pytest
-
-from agent_runtime.action_planner import ActionPlanningError, plan_actions
-from agent_runtime.intent import IntentEnvelope, IntentStep, normalize_intent
-
-
-def _single_cube_scene() -> dict[str, object]:
-    return {
-        "active_object": "Cube",
-        "selected_objects": ["Cube"],
-        "current_frame": 1,
-        "objects": [
-            {
-                "name": "Cube",
-                "type": "MESH",
-                "selected": True,
-                "active": True,
-                "location": [0.0, 0.0, 0.0],
-                "rotation_euler": [0.0, 0.0, 0.0],
-                "scale": [1.0, 1.0, 1.0],
-            }
-        ],
-    }
+from agent_runtime.construction import compile_construction_plan, decompose_scene_intent
+from agent_runtime.scene_intent import (
+    SceneEntity,
+    SceneIntent,
+    SceneRelationship,
+    SceneTransformIntent,
+    normalize_scene_intent,
+    parse_scene_intent_content,
+)
 
 
-def test_normalize_intent_maps_a_couple_into_downward_transform() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target="that plane",
-                target_name="Plane",
-                direction="into the ground",
-                magnitude_qualifier="a couple",
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
-    )
-    scene_state = {
-        "active_object": "Plane",
-        "selected_objects": ["Plane"],
-        "current_frame": 1,
-        "objects": [
-            {
-                "name": "Plane",
-                "type": "MESH",
-                "selected": True,
-                "active": True,
-                "location": [5.0, -11.0, 0.0],
-                "rotation_euler": [0.0, 0.0, 0.0],
-                "scale": [1.0, 1.0, 1.0],
-            }
-        ],
-    }
+def test_parse_scene_intent_falls_back_to_labeled_text() -> None:
+    content = """
+    STATUS: ok
+    CONFIDENCE: 0.9
+    REASONING: Build two cubes and separate them.
+    ENTITIES:
+    - logical_id: cube_pair; kind: cube; quantity: 2; group_id: cube_pair_group
+    RELATIONSHIPS:
+    - logical_id: spread_pair; relation_type: relative_offset; source_id: cube_pair; offset: [3.0, 0.0, 0.0]
+    GROUPS:
+    - logical_id: cube_pair_group; entity_ids: ['cube_pair_1', 'cube_pair_2']; pronouns: ['them', 'both']
+    """
 
-    normalized = normalize_intent(
-        intent,
-        prompt="move that plane a couple units into the ground",
-        scene_state=scene_state,
+    intent = parse_scene_intent_content(content)
+
+    assert intent.status == "ok"
+    assert intent.entities[0].logical_id == "cube_pair"
+    assert intent.relationships[0].relation_type == "relative_offset"
+
+
+def test_compile_construction_plan_handles_multiple_entities_with_absolute_offsets() -> None:
+    intent = normalize_scene_intent(
+        SceneIntent(
+            status="ok",
+            confidence=0.9,
+            reasoning="Create two entities with fixed offsets.",
+            entities=[
+                SceneEntity(
+                    logical_id="plane_left",
+                    kind="plane",
+                    initial_transform=SceneTransformIntent(offset=[3.0, 0.0, -10.0]),
+                ),
+                SceneEntity(
+                    logical_id="cube_right",
+                    kind="cube",
+                    initial_transform=SceneTransformIntent(offset=[-17.0, 0.0, -4.0]),
+                ),
+            ],
+        ),
         minimum_confidence=0.35,
     )
 
-    assert normalized.status == "ok"
-    assert normalized.steps[0].direction == "down"
-    assert normalized.steps[0].magnitude == 2.0
-    assert normalized.steps[0].target_name == "Plane"
+    compiled = compile_construction_plan(intent, scene_state={"objects": []}, max_construction_steps=None)
 
-
-def test_normalize_intent_resolves_pronoun_to_active_object() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target="it",
-                direction="back",
-                magnitude=2,
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
-    )
-
-    normalized = normalize_intent(
-        intent,
-        prompt="move it back",
-        scene_state=_single_cube_scene(),
-        minimum_confidence=0.35,
-    )
-
-    assert normalized.status == "ok"
-    assert normalized.steps[0].target_name == "Cube"
-    assert normalized.steps[0].direction == "backward"
-
-
-def test_normalize_intent_fails_closed_when_direction_is_missing() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target_name="Cube",
-                magnitude_qualifier="a bit",
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
-    )
-
-    normalized = normalize_intent(
-        intent,
-        prompt="move cube a bit",
-        scene_state=_single_cube_scene(),
-        minimum_confidence=0.35,
-    )
-
-    assert normalized.status == "no_action"
-    assert "direction" in normalized.reason.lower()
-
-
-def test_plan_actions_builds_absolute_transform_vector() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target_name="Cube",
-                direction="forward",
-                magnitude=2.0,
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
-    )
-
-    actions = plan_actions(intent, scene_state=_single_cube_scene())
-
-    assert actions == [
+    assert compiled.actions == [
         {
-            "action_id": "step_1_transform_cube",
-            "tool": "object.transform",
-            "params": {"object_name": "Cube", "location": [0.0, 2.0, 0.0]},
-        }
-    ]
-
-
-def test_plan_actions_builds_rotation_with_default_z_axis() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target_name="Cube",
-                magnitude=45.0,
-                transform_kind="rotation",
-                axis="z",
-                confidence=0.8,
-            )
-        ],
-    )
-
-    actions = plan_actions(intent, scene_state=_single_cube_scene())
-
-    assert actions[0]["tool"] == "object.transform"
-    assert actions[0]["params"]["rotation_euler"][2] == pytest.approx(0.78539816339)
-
-
-def test_plan_actions_supports_previous_step_refs_for_multi_step_requests() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(action="create", primitive_type="cube", confidence=0.8),
-            IntentStep(
-                action="transform",
-                target_ref="previous_step",
-                target="it",
-                direction="forward",
-                magnitude=2.0,
-                transform_kind="location",
-                confidence=0.8,
-            ),
-        ],
-    )
-
-    actions = plan_actions(intent, scene_state={"active_object": None, "selected_objects": [], "objects": []})
-
-    assert actions == [
-        {
-            "action_id": "step_1_create_cube",
+            "action_id": "create_plane_left",
             "tool": "mesh.create_primitive",
-            "params": {"primitive_type": "cube", "location": [0.0, 0.0, 0.0]},
+            "params": {
+                "primitive_type": "plane",
+                "name": "Plane_1",
+                "location": [3.0, 0.0, -10.0],
+            },
         },
         {
-            "action_id": "step_2_transform_previous",
-            "tool": "object.transform",
+            "action_id": "create_cube_right",
+            "tool": "mesh.create_primitive",
             "params": {
-                "object_name": {"$ref": "step_1_create_cube.object_name"},
-                "location": [0.0, 2.0, 0.0],
+                "primitive_type": "cube",
+                "name": "Cube_1",
+                "location": [-17.0, 0.0, -4.0],
             },
         },
     ]
 
 
-def test_plan_actions_rejects_unresolved_previous_step_reference() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target_ref="previous_step",
-                direction="forward",
-                magnitude=2.0,
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
+def test_compile_construction_plan_creates_group_and_resolves_relative_offset() -> None:
+    intent = normalize_scene_intent(
+        SceneIntent(
+            status="ok",
+            confidence=0.9,
+            reasoning="Create two cubes and move them apart.",
+            entities=[
+                SceneEntity(
+                    logical_id="cube_pair",
+                    kind="cube",
+                    quantity=2,
+                    group_id="cube_pair_group",
+                )
+            ],
+            relationships=[
+                SceneRelationship(
+                    logical_id="spread_pair",
+                    relation_type="relative_offset",
+                    source_id="cube_pair",
+                    offset=[3.0, 0.0, 0.0],
+                )
+            ],
+        ),
+        minimum_confidence=0.35,
     )
 
-    with pytest.raises(ActionPlanningError, match="previous object"):
-        plan_actions(intent, scene_state={"active_object": None, "selected_objects": [], "objects": []})
+    compiled = compile_construction_plan(intent, scene_state={"objects": []}, max_construction_steps=None)
+
+    assert [action["tool"] for action in compiled.actions] == [
+        "mesh.create_primitive",
+        "mesh.create_primitive",
+        "object.transform",
+    ]
+    assert compiled.state.groups["cube_pair_group"] == ["cube_pair_1", "cube_pair_2"]
+    assert compiled.actions[-1]["params"]["object_name"] == "Cube_2"
+    assert compiled.actions[-1]["params"]["location"] == [3.0, 0.0, 0.0]
+
+
+def test_compile_construction_plan_uses_deterministic_naming_from_scene_state() -> None:
+    intent = normalize_scene_intent(
+        SceneIntent(
+            status="ok",
+            confidence=0.9,
+            reasoning="Create one more cube.",
+            entities=[SceneEntity(logical_id="cube_pair", kind="cube", quantity=2, group_id="cube_pair_group")],
+        ),
+        minimum_confidence=0.35,
+    )
+
+    compiled = compile_construction_plan(
+        intent,
+        scene_state={
+            "objects": [
+                {
+                    "name": "Cube_1",
+                    "type": "MESH",
+                    "location": [0.0, 0.0, 0.0],
+                    "dimensions": [2.0, 2.0, 2.0],
+                }
+            ]
+        },
+        max_construction_steps=1,
+    )
+
+    assert compiled.actions[0]["params"]["name"] == "Cube_2"
+
+
+def test_compile_construction_plan_satisfies_above_relationship_from_geometry() -> None:
+    intent = normalize_scene_intent(
+        SceneIntent(
+            status="ok",
+            confidence=0.9,
+            reasoning="Place one cube on top of another.",
+            entities=[
+                SceneEntity(logical_id="base_cube", kind="cube"),
+                SceneEntity(logical_id="top_cube", kind="cube"),
+            ],
+            relationships=[
+                SceneRelationship(
+                    logical_id="stack_top",
+                    relation_type="above",
+                    source_id="top_cube",
+                    target_id="base_cube",
+                    metadata={"touching": True},
+                )
+            ],
+        ),
+        minimum_confidence=0.35,
+    )
+
+    compiled = compile_construction_plan(intent, scene_state={"objects": []}, max_construction_steps=None)
+
+    assert compiled.actions[0]["params"]["name"] == "Cube_1"
+    assert compiled.actions[1]["params"]["name"] == "Cube_2"
+    assert compiled.actions[-1]["tool"] == "object.transform"
+    assert compiled.actions[-1]["params"]["location"] == [0.0, 0.0, 2.0]
+
+
+def test_compile_construction_plan_expands_staircase_pattern_into_stepwise_relations() -> None:
+    intent = normalize_scene_intent(
+        SceneIntent(
+            status="ok",
+            confidence=0.9,
+            reasoning="Create a staircase of cubes.",
+            entities=[
+                SceneEntity(
+                    logical_id="stairs",
+                    kind="cube",
+                    quantity=5,
+                    group_id="stairs_group",
+                )
+            ],
+            metadata={"pattern": "staircase", "stair_offset": [1.25, 0.0, 1.0]},
+        ),
+        minimum_confidence=0.35,
+    )
+
+    steps = decompose_scene_intent(intent)
+    compiled = compile_construction_plan(intent, scene_state={"objects": []}, max_construction_steps=None)
+
+    assert any(step.kind == "satisfy_relation" for step in steps)
+    assert len([action for action in compiled.actions if action["tool"] == "mesh.create_primitive"]) == 5
+    assert compiled.actions[-1]["params"]["location"] == [5.0, 0.0, 4.0]

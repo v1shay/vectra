@@ -31,6 +31,7 @@ class ReasoningStep:
     preferred_execution_mode: ExecutionMode
     continue_loop: bool
     question: str | None = None
+    error: str | None = None
     uncertainty_notes: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -43,3 +44,4 @@ class ExecutionInstruction:
     code: str | None = None
     expected_outcome: str = ""
     signature: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)

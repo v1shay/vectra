@@ -49,6 +49,7 @@ class AgentService:
             preferred_execution_mode=reasoning.preferred_execution_mode,
             continue_loop=reasoning.continue_loop,
             question=reasoning.question,
+            error=reasoning.error,
             expected_outcome=reasoning.expected_outcome,
             execution=ExecutionPayloadModel(
                 kind=instruction.kind,
@@ -56,5 +57,6 @@ class AgentService:
                 actions=instruction.actions,
                 code=instruction.code,
                 expected_outcome=instruction.expected_outcome,
+                metadata=instruction.metadata,
             ),
         )

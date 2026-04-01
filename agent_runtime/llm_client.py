@@ -2,24 +2,25 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-from vectra.tools.registry import get_default_registry
 from vectra.utils.logging import get_vectra_logger, log_structured
 
 try:
-    from .intent import IntentEnvelope
+    from .scene_intent import SceneIntent, SceneIntentParseError, parse_scene_intent_content
 except ImportError:  # pragma: no cover - supports local module imports from agent_runtime/
-    from intent import IntentEnvelope
+    from scene_intent import SceneIntent, SceneIntentParseError, parse_scene_intent_content
 
-DEFAULT_TIMEOUT_SECONDS = 20.0
+DEFAULT_TIMEOUT_SECONDS = 45.0
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_SCENE_OBJECT_LIMIT = 30
 OLLAMA_DISCOVERY_TIMEOUT_SECONDS = 2.0
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_API_KEY = "ollama"
-DEFAULT_PROVIDER_CONFIDENCE = 0.35
 PREFERRED_OLLAMA_MODEL_HINTS = (
     "qwen2.5-coder",
     "deepseek-coder-v2",
@@ -41,6 +42,10 @@ class LLMRequestError(LLMClientError):
     """Raised when the LLM request cannot be completed."""
 
 
+class LLMTimeoutError(LLMRequestError):
+    """Raised when the LLM request timed out after all retries."""
+
+
 class LLMResponseError(LLMClientError):
     """Raised when the LLM response is invalid."""
 
@@ -53,6 +58,13 @@ class LLMEndpointConfig:
     model: str
 
 
+@dataclass(frozen=True)
+class LLMRuntimeSettings:
+    timeout_seconds: float
+    max_retries: int
+    scene_object_limit: int
+
+
 _LLM_LOGGER = get_vectra_logger("vectra.runtime.llm")
 
 
@@ -63,6 +75,34 @@ def _normalize_http_url(raw_url: str) -> str:
     if not normalized.startswith(("http://", "https://")):
         normalized = f"http://{normalized}"
     return normalized.rstrip("/")
+
+
+def _read_float_env(flag_name: str, default: float) -> float:
+    raw_value = os.getenv(flag_name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return max(float(raw_value), 1.0)
+    except ValueError:
+        return default
+
+
+def _read_int_env(flag_name: str, default: int) -> int:
+    raw_value = os.getenv(flag_name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return max(int(raw_value), 0)
+    except ValueError:
+        return default
+
+
+def read_runtime_settings() -> LLMRuntimeSettings:
+    return LLMRuntimeSettings(
+        timeout_seconds=_read_float_env("VECTRA_LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
+        max_retries=_read_int_env("VECTRA_LLM_MAX_RETRIES", DEFAULT_MAX_RETRIES),
+        scene_object_limit=_read_int_env("VECTRA_LLM_SCENE_OBJECT_LIMIT", DEFAULT_SCENE_OBJECT_LIMIT),
+    )
 
 
 def _read_env_config(
@@ -156,61 +196,57 @@ def _provider_chain() -> list[LLMEndpointConfig]:
     return providers
 
 
-def _tool_metadata() -> list[dict[str, Any]]:
-    registry = get_default_registry()
-    registry.discover()
-    metadata: list[dict[str, Any]] = []
-    for tool_name in registry.list_tools():
-        tool = registry.get(tool_name)
-        metadata.append(
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-                "output_schema": tool.output_schema,
-            }
-        )
-    return metadata
-
-
-def _format_tool_catalog() -> str:
-    lines: list[str] = []
-    for tool in _tool_metadata():
-        lines.extend(
-            [
-                f"Tool: {tool['name']}",
-                f"- Meaning: {tool['description']}",
-                f"- Exact input schema: {json.dumps(tool['input_schema'], sort_keys=True)}",
-                f"- Exact output schema: {json.dumps(tool['output_schema'], sort_keys=True)}",
-            ]
-        )
-    return "\n".join(lines)
-
-
-def _intent_schema_description() -> str:
+def _scene_intent_schema_description() -> str:
     return json.dumps(
         {
             "status": "ok | no_action",
             "confidence": "number between 0 and 1",
-            "reason": "string",
-            "steps": [
+            "reasoning": "string",
+            "entities": [
                 {
-                    "action": "create | transform",
-                    "target": "optional raw target phrase",
-                    "target_name": "optional exact object name when certain",
-                    "target_ref": (
-                        "optional reference type such as active_object, selected_object, "
-                        "previous_step"
-                    ),
-                    "primitive_type": "optional primitive name for create intents",
-                    "direction": "optional direction label",
-                    "magnitude": "optional numeric magnitude",
-                    "magnitude_qualifier": "optional vague magnitude phrase such as 'a bit' or 'a couple'",
-                    "transform_kind": "optional location | rotation | scale",
-                    "axis": "optional x | y | z",
-                    "confidence": "number between 0 and 1",
+                    "logical_id": "stable logical id such as cube_pair or plane_left",
+                    "kind": "cube | plane | uv_sphere",
+                    "display_name": "optional display label",
+                    "quantity": "integer >= 1",
+                    "source": "create | reference | auto",
+                    "reference_name": "optional exact scene object name when referencing",
+                    "group_id": "optional logical group id",
+                    "initial_transform": {
+                        "offset": "[x, y, z] absolute placement intent from world origin",
+                    },
                 }
             ],
+            "relationships": [
+                {
+                    "logical_id": "stable relationship id",
+                    "relation_type": "left_of | right_of | above | below | next_to | relative_offset",
+                    "source_id": "source logical entity id",
+                    "target_id": "optional target logical entity id",
+                    "target_group_id": "optional target group id",
+                    "offset": "optional [x, y, z] for relative_offset",
+                    "distance": "optional numeric spacing",
+                    "metadata": {"touching": "optional boolean for stacking"},
+                }
+            ],
+            "groups": [
+                {
+                    "logical_id": "group id",
+                    "entity_ids": ["entity logical ids"],
+                    "pronouns": ["them", "both", "all", "each"],
+                }
+            ],
+            "construction_steps": [
+                {
+                    "logical_id": "stable step id",
+                    "kind": "ensure_entity | apply_transform | resolve_group | satisfy_relation",
+                    "entity_id": "optional entity id",
+                    "relationship_id": "optional relationship id",
+                    "group_id": "optional group id",
+                    "offset": "optional [x, y, z]",
+                }
+            ],
+            "uncertainty_notes": ["optional notes"],
+            "metadata": {"pattern": "optional high-level pattern like staircase"},
         },
         indent=2,
         sort_keys=True,
@@ -218,70 +254,68 @@ def _intent_schema_description() -> str:
 
 
 def _system_prompt() -> str:
-    tool_catalog = _format_tool_catalog()
     return (
-        "You are Vectra's intent parser.\n"
-        "Convert the user request and scene_state into a high-level JSON intent object.\n"
-        "Return JSON object only. Do not return markdown. Do not explain. Do not produce actions.\n"
-        "The output must exactly match the documented intent schema.\n"
-        "Use status='no_action' with an empty steps list when the request is ambiguous, unsupported, "
-        "or unsafe to ground from scene_state.\n"
-        "Do not guess missing targets, directions, tools, or geometry.\n"
-        "Normalize requests into a compact semantic form:\n"
-        "- action=create only when the primitive is explicit and supported\n"
-        "- action=transform for movement, rotation, or scale adjustments\n"
-        "- transform_kind should be one of location, rotation, or scale\n"
-        "- direction should capture movement semantics like forward, backward, up, down, left, right\n"
-        "- if the user says 'into the ground', preserve that as a downward movement intent\n"
-        "- if the user gives vague magnitudes like 'a bit' or 'a couple', store them in magnitude_qualifier\n"
-        "- if the user refers to the active or selected object indirectly, use target_ref when appropriate\n"
-        "- if a later step refers to an object created earlier in the same request, use target_ref='previous_step'\n"
-        "- for rotation without an axis, prefer axis='z'\n"
-        "Only describe intent. The local planner will decide exact actions.\n"
-        "Supported tool catalog for downstream planning:\n"
-        f"{tool_catalog}\n"
-        "Intent schema:\n"
-        f"{_intent_schema_description()}"
+        "You are Vectra's SceneIntent planner.\n"
+        "Translate the user's request and compact scene summary into a typed scene construction plan.\n"
+        "Return either:\n"
+        "1) a JSON object matching the documented SceneIntent schema exactly, or\n"
+        "2) a labeled text object with sections STATUS, CONFIDENCE, REASONING, ENTITIES, RELATIONSHIPS, "
+        "GROUPS, CONSTRUCTION_STEPS, UNCERTAINTY, and METADATA.\n"
+        "Do not return markdown. Do not emit tool calls. Do not emit Python. Do not describe Blender operators.\n"
+        "Entities represent scene objects to create or reference, not executable actions.\n"
+        "Relationships must be explicit and data-oriented.\n"
+        "Prefer stable logical ids and explicit quantities.\n"
+        "When a request contains quantity or plural references, add a group and use pronouns like them/both/all/each there.\n"
+        "Use relation_type='relative_offset' for requests like move them apart or staircase layouts.\n"
+        "Use status='no_action' when the request cannot be grounded safely.\n"
+        "SceneIntent schema:\n"
+        f"{_scene_intent_schema_description()}"
     )
 
 
-def _scene_object_summary(scene_state: dict[str, Any]) -> str:
+def _scene_object_summary(scene_state: dict[str, Any], *, object_limit: int) -> str:
     objects = scene_state.get("objects", [])
     if not isinstance(objects, list) or not objects:
-        return "- No scene objects provided"
+        return "- no scene objects"
 
     lines: list[str] = []
-    for obj in objects:
-        if not isinstance(obj, dict):
+    for raw_object in objects[:object_limit]:
+        if not isinstance(raw_object, dict):
             continue
         lines.append(
             "- "
-            f"{obj.get('name', '<unknown>')} | type={obj.get('type', '<unknown>')} | "
-            f"active={obj.get('active', False)} | selected={obj.get('selected', False)} | "
-            f"location={obj.get('location', [])} | rotation_euler={obj.get('rotation_euler', [])} | "
-            f"scale={obj.get('scale', [])}"
+            f"name={raw_object.get('name', '<unknown>')} "
+            f"type={raw_object.get('type', '<unknown>')} "
+            f"selected={raw_object.get('selected', False)} "
+            f"active={raw_object.get('active', False)} "
+            f"location={raw_object.get('location', [])} "
+            f"rotation={raw_object.get('rotation_euler', [])} "
+            f"scale={raw_object.get('scale', [])} "
+            f"dimensions={raw_object.get('dimensions', [])}"
         )
-    return "\n".join(lines) if lines else "- No scene objects provided"
+
+    remaining = max(len(objects) - object_limit, 0)
+    if remaining:
+        lines.append(f"- truncated_additional_objects={remaining}")
+    return "\n".join(lines) if lines else "- no scene objects"
 
 
-def _user_content(prompt: str, scene_state: dict[str, Any]) -> str:
+def _user_content(prompt: str, scene_state: dict[str, Any], *, settings: LLMRuntimeSettings) -> str:
     return (
         f"User request:\n{prompt}\n\n"
-        "Scene focus:\n"
+        "Scene summary:\n"
         f"- active_object: {scene_state.get('active_object')}\n"
         f"- selected_objects: {scene_state.get('selected_objects', [])}\n"
-        f"- current_frame: {scene_state.get('current_frame')}\n\n"
-        "Scene objects summary:\n"
-        f"{_scene_object_summary(scene_state)}\n\n"
-        "Raw scene_state JSON:\n"
-        f"{json.dumps(scene_state, indent=2, sort_keys=True)}"
+        f"- object_count: {len(scene_state.get('objects', [])) if isinstance(scene_state.get('objects'), list) else 0}\n"
+        "Compact object list:\n"
+        f"{_scene_object_summary(scene_state, object_limit=settings.scene_object_limit)}"
     )
 
 
-def _messages(prompt: str, scene_state: dict[str, Any]) -> list[dict[str, str]]:
+def _messages(prompt: str, scene_state: dict[str, Any], *, settings: LLMRuntimeSettings) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": _system_prompt()},
-        {"role": "user", "content": _user_content(prompt, scene_state)},
+        {"role": "user", "content": _user_content(prompt, scene_state, settings=settings)},
     ]
 
 
@@ -305,87 +339,167 @@ def _extract_message_content(response_json: dict[str, Any]) -> str:
     raise LLMResponseError("LLM response content must be a string")
 
 
-def _parse_intent(content: str) -> IntentEnvelope:
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise LLMResponseError(f"LLM returned invalid JSON: {exc.msg}") from exc
+def _elapsed_ms(start_time: float) -> int:
+    return int((time.perf_counter() - start_time) * 1000)
 
-    if not isinstance(parsed, dict):
-        raise LLMResponseError("LLM response must be a JSON object")
 
-    try:
-        return IntentEnvelope.model_validate(parsed)
-    except Exception as exc:
-        raise LLMResponseError(f"LLM response did not match the intent schema: {exc}") from exc
+def _log_started(config: LLMEndpointConfig, *, attempt: int, timeout_seconds: float) -> None:
+    log_structured(
+        _LLM_LOGGER,
+        "llm_request_started",
+        {
+            "provider": config.name,
+            "model": config.model,
+            "attempt": attempt,
+            "timeout_seconds": timeout_seconds,
+        },
+    )
+
+
+def _log_completed(config: LLMEndpointConfig, *, attempt: int, elapsed_ms: int) -> None:
+    log_structured(
+        _LLM_LOGGER,
+        "llm_request_completed",
+        {
+            "provider": config.name,
+            "model": config.model,
+            "attempt": attempt,
+            "elapsed_ms": elapsed_ms,
+        },
+    )
+
+
+def _log_timed_out(config: LLMEndpointConfig, *, attempt: int, elapsed_ms: int) -> None:
+    log_structured(
+        _LLM_LOGGER,
+        "llm_request_timed_out",
+        {
+            "provider": config.name,
+            "model": config.model,
+            "attempt": attempt,
+            "elapsed_ms": elapsed_ms,
+        },
+        level="warning",
+    )
+
+
+def _log_provider_failure(config: LLMEndpointConfig, *, attempt: int, elapsed_ms: int, message: str) -> None:
+    log_structured(
+        _LLM_LOGGER,
+        "llm_provider_failure",
+        {
+            "provider": config.name,
+            "model": config.model,
+            "attempt": attempt,
+            "elapsed_ms": elapsed_ms,
+            "message": message,
+        },
+        level="warning",
+    )
 
 
 def _request_content_for_config(
     config: LLMEndpointConfig,
     messages: list[dict[str, str]],
+    *,
+    settings: LLMRuntimeSettings,
 ) -> str:
-    log_structured(_LLM_LOGGER, "llm_provider_attempt", {"provider": config.name, "model": config.model})
-    try:
-        response = httpx.post(
-            f"{config.base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": config.model,
-                "temperature": 0,
-                "messages": messages,
-            },
-            timeout=DEFAULT_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise LLMRequestError(f"LLM request failed for {config.name}: {exc}") from exc
+    attempts = settings.max_retries + 1
+    last_error: LLMClientError | None = None
 
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise LLMResponseError(f"LLM response body was not valid JSON for {config.name}") from exc
+    for attempt in range(1, attempts + 1):
+        started_at = time.perf_counter()
+        _log_started(config, attempt=attempt, timeout_seconds=settings.timeout_seconds)
+        try:
+            response = httpx.post(
+                f"{config.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {config.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": config.model,
+                    "temperature": 0,
+                    "messages": messages,
+                },
+                timeout=settings.timeout_seconds,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            content = _extract_message_content(payload)
+            _log_completed(config, attempt=attempt, elapsed_ms=_elapsed_ms(started_at))
+            log_structured(
+                _LLM_LOGGER,
+                "llm_raw_output",
+                {"provider": config.name, "model": config.model, "attempt": attempt, "content": content},
+            )
+            return content
+        except httpx.TimeoutException as exc:
+            elapsed_ms = _elapsed_ms(started_at)
+            _log_timed_out(config, attempt=attempt, elapsed_ms=elapsed_ms)
+            if attempt > settings.max_retries:
+                message = (
+                    f"LLM request timed out for {config.name} after {attempt} attempt(s) "
+                    f"at {settings.timeout_seconds:.1f}s"
+                )
+                _log_provider_failure(config, attempt=attempt, elapsed_ms=elapsed_ms, message=message)
+                last_error = LLMTimeoutError(message)
+                break
+            last_error = LLMTimeoutError(
+                f"LLM request timed out for {config.name} on attempt {attempt}"
+            )
+            continue
+        except httpx.HTTPError as exc:
+            elapsed_ms = _elapsed_ms(started_at)
+            message = f"LLM request failed for {config.name}: {exc}"
+            _log_provider_failure(config, attempt=attempt, elapsed_ms=elapsed_ms, message=message)
+            raise LLMRequestError(message) from exc
+        except ValueError as exc:
+            elapsed_ms = _elapsed_ms(started_at)
+            message = f"LLM response body was not valid JSON for {config.name}"
+            _log_provider_failure(config, attempt=attempt, elapsed_ms=elapsed_ms, message=message)
+            raise LLMResponseError(message) from exc
 
-    content = _extract_message_content(payload)
-    log_structured(_LLM_LOGGER, "llm_provider_used", {"provider": config.name, "model": config.model})
-    log_structured(_LLM_LOGGER, "llm_raw_output", {"provider": config.name, "content": content})
-    return content
+    if last_error is None:  # pragma: no cover - defensive guard
+        raise LLMRequestError(f"LLM request failed for {config.name}")
+    raise last_error
 
 
-def _request_intent_for_config(
+def _request_scene_intent_for_config(
     config: LLMEndpointConfig,
     prompt: str,
     scene_state: dict[str, Any],
-) -> IntentEnvelope:
-    content = _request_content_for_config(config, _messages(prompt, scene_state))
-    intent = _parse_intent(content)
+    *,
+    settings: LLMRuntimeSettings,
+) -> SceneIntent:
+    content = _request_content_for_config(config, _messages(prompt, scene_state, settings=settings), settings=settings)
+    try:
+        scene_intent = parse_scene_intent_content(content)
+    except SceneIntentParseError as exc:
+        raise LLMResponseError(str(exc)) from exc
+
     log_structured(
         _LLM_LOGGER,
-        "llm_parsed_intent",
-        {"provider": config.name, "intent": intent.model_dump()},
+        "llm_parsed_scene_intent",
+        {"provider": config.name, "model": config.model, "intent": scene_intent.model_dump()},
     )
-    return intent
+    return scene_intent
 
 
-def extract_intent(prompt: str, scene_state: dict[str, Any]) -> IntentEnvelope:
+def extract_scene_intent(prompt: str, scene_state: dict[str, Any]) -> SceneIntent:
+    settings = read_runtime_settings()
     last_error: LLMClientError | None = None
-    for index, config in enumerate(_provider_chain()):
+    for config in _provider_chain():
         try:
-            return _request_intent_for_config(config, prompt, scene_state)
+            return _request_scene_intent_for_config(
+                config,
+                prompt,
+                scene_state,
+                settings=settings,
+            )
         except LLMClientError as exc:
             last_error = exc
-            is_primary = index == 0
-            if is_primary:
-                log_structured(
-                    _LLM_LOGGER,
-                    "llm_provider_failure",
-                    {"provider": config.name, "message": str(exc)},
-                    level="warning",
-                )
-                continue
-            break
+            continue
 
     if last_error is None:  # pragma: no cover - defensive guard
         raise LLMRequestError("LLM request failed for all configured providers")
