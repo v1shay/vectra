@@ -245,6 +245,58 @@ def _format_examples() -> str:
             ],
         },
         {
+            "name": "Colloquial reference can still resolve to the active object",
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "move this shit forward 2",
+            "output": [
+                {
+                    "action_id": "move_active_forward",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "location": [0, 2, 0],
+                    },
+                }
+            ],
+        },
+        {
+            "name": "Very informal shorthand can still refer to the active object when unique",
+            "scene": {
+                "active_object": "Cube",
+                "selected_objects": ["Cube"],
+                "objects": [
+                    {
+                        "name": "Cube",
+                        "location": [0, 0, 0],
+                        "selected": True,
+                        "active": True,
+                    }
+                ],
+            },
+            "user": "move ts forward 2",
+            "output": [
+                {
+                    "action_id": "move_active_forward",
+                    "tool": "object.transform",
+                    "params": {
+                        "object_name": "Cube",
+                        "location": [0, 2, 0],
+                    },
+                }
+            ],
+        },
+        {
             "name": "Move backward on -Y",
             "scene": {
                 "active_object": "Cube",
@@ -393,6 +445,16 @@ def _format_examples() -> str:
             "user": "move cube somewhere weird",
             "output": [],
         },
+        {
+            "name": "Vague creation requests must fail instead of inventing geometry",
+            "scene": {
+                "active_object": None,
+                "selected_objects": [],
+                "objects": [],
+            },
+            "user": "make some shit",
+            "output": [],
+        },
     ]
     rendered: list[str] = []
     for example in examples:
@@ -433,7 +495,12 @@ def _system_prompt() -> str:
         "If the user gives only one directional move, preserve the object's other coordinates from scene_state and output the final full vector.\n"
         "If the user says rotate without an axis, use the Z axis.\n"
         "Angles in rotation_euler must be radians.\n"
+        "Colloquial references like 'it', 'this', 'that', 'this thing', 'that thing', 'this object', "
+        "'this cube', 'this shit', and shorthand like 'ts' refer to the active object or only selected "
+        "object when the reference is unique in scene_state.\n"
+        "Profanity, slang, and casual phrasing do not change the underlying action semantics.\n"
         "Use [] when the request is ambiguous, unsupported, or cannot be grounded safely from scene_state.\n"
+        "If the user does not specify a concrete operation or target, return [].\n"
         "Never guess hidden intent. Never fabricate coordinates for vague language like 'somewhere weird'.\n"
         "Use $ref only in the exact form {\"$ref\":\"action_id.output_key\"}.\n"
         "Only use $ref when the referenced action_id already exists earlier in the same array and the output_key exists in that tool's output schema.\n"

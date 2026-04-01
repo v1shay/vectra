@@ -61,6 +61,9 @@ def test_system_prompt_includes_coordinate_and_schema_guidance() -> None:
     assert "No extra top-level keys are allowed." in prompt
     assert "Vector params must be explicit JSON arrays in [x, y, z] order." in prompt
     assert "If the user says rotate without an axis, use the Z axis." in prompt
+    assert "this shit" in prompt
+    assert "shorthand like 'ts'" in prompt
+    assert "If the user does not specify a concrete operation or target, return []" in prompt
     assert "Never fabricate coordinates for vague language like 'somewhere weird'." in prompt
     assert "create a cube and move it forward 2" in prompt
 

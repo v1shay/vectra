@@ -28,11 +28,15 @@ class VECTRA_PT_panel(bpy.types.Panel):
         layout.label(text=f"Phase: {scene.vectra_phase}")
 
         status = addon_loader.get_runtime_status()
+        configured_source = current_dev_source_path(context)
         dev_box = layout.box()
         dev_box.label(text=f"Runtime: {status.mode}")
         dev_box.label(
-            text=f"Source: {status.source_path or current_dev_source_path(context) or 'Packaged add-on'}"
+            text=f"Source: {status.source_path or configured_source or 'Packaged add-on'}"
         )
+        if status.mode == "packaged" and not configured_source:
+            dev_box.label(text="Set Dev Source Path to the repo root for backend auto-start.")
+            dev_box.label(text="Packaged mode without a repo path can only talk to an already-running backend.")
         block_reason = get_reload_block_reason()
         if block_reason:
             dev_box.label(text=f"Reload blocked: {block_reason}")
