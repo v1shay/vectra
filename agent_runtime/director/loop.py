@@ -8,6 +8,7 @@ from vectra.tools.registry import ToolRegistry, get_default_registry
 
 from .models import (
     AssumptionRecord,
+    BudgetState,
     ControllerDecision,
     DirectorContext,
     DirectorTurn,
@@ -16,6 +17,9 @@ from .models import (
 )
 from .providers import ProviderError, call_controller, call_director
 from .resolver import ReferenceResolver
+
+_TURN_BUDGETS = {"low": 8, "medium": 12, "high": 16}
+_BATCH_LIMIT = 4
 
 
 def _json_schema_for_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -108,32 +112,81 @@ def _control_tools(execution_mode: str) -> list[dict[str, Any]]:
     return tools
 
 
+def _tool_family(tool_name: str) -> str:
+    if tool_name.startswith("mesh.create"):
+        return "create"
+    if tool_name.startswith("object.transform"):
+        return "transform"
+    if tool_name.startswith("object.duplicate"):
+        return "duplicate"
+    if tool_name.startswith("object.delete"):
+        return "delete"
+    if tool_name.startswith("object.distribute") or tool_name.startswith("object.align"):
+        return "layout"
+    if tool_name.startswith("object.parent") or tool_name.startswith("scene.group"):
+        return "structure"
+    if tool_name.startswith("material."):
+        return "material"
+    if tool_name.startswith("light."):
+        return "light"
+    if tool_name.startswith("camera."):
+        return "camera"
+    if tool_name.startswith("scene.set_frame") or tool_name.startswith("object.keyframe"):
+        return "animation"
+    if tool_name.startswith("scene.capture") or tool_name.startswith("scene.get_state") or tool_name.startswith("scene.frame_view"):
+        return "observe"
+    if tool_name.startswith("python."):
+        return "code"
+    return "generic"
+
+
+def _drop_none_values(params: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in params.items() if value is not None}
+
+
 def _compact_scene_state(scene_state: dict[str, Any]) -> str:
     objects = scene_state.get("objects", [])
     compact_objects: list[str] = []
     if isinstance(objects, list):
-        for obj in objects[:30]:
+        for obj in objects[:24]:
             if not isinstance(obj, dict):
                 continue
             compact_objects.append(
                 "name={name} type={type} active={active} selected={selected} "
-                "location={location} dimensions={dimensions}".format(
+                "location={location} dimensions={dimensions} parent={parent} materials={materials} animation={animation}".format(
                     name=obj.get("name"),
                     type=obj.get("type"),
                     active=obj.get("active", False),
                     selected=obj.get("selected", False),
                     location=obj.get("location"),
                     dimensions=obj.get("dimensions"),
+                    parent=obj.get("parent"),
+                    materials=obj.get("material_names", []),
+                    animation=obj.get("keyframe_count", 0),
                 )
             )
+    lights = scene_state.get("lights", [])
+    groups = scene_state.get("groups", [])
     return (
         f"Active object: {scene_state.get('active_object')}\n"
         f"Selected objects: {scene_state.get('selected_objects', [])}\n"
+        f"Active camera: {scene_state.get('active_camera')}\n"
+        f"Current frame: {scene_state.get('current_frame')}\n"
+        f"Scene centroid: {scene_state.get('scene_centroid')}\n"
+        f"Scene bounds: {scene_state.get('scene_bounds')}\n"
+        f"Lights: {lights}\n"
+        f"Groups: {groups}\n"
         f"Objects:\n- " + "\n- ".join(compact_objects)
         if compact_objects
         else (
             f"Active object: {scene_state.get('active_object')}\n"
             f"Selected objects: {scene_state.get('selected_objects', [])}\n"
+            f"Active camera: {scene_state.get('active_camera')}\n"
+            f"Current frame: {scene_state.get('current_frame')}\n"
+            f"Scene centroid: {scene_state.get('scene_centroid')}\n"
+            f"Scene bounds: {scene_state.get('scene_bounds')}\n"
+            f"Lights: {lights}\n"
+            f"Groups: {groups}\n"
             "Objects: none"
         )
     )
@@ -143,36 +196,76 @@ def _history_summary(history: list[dict[str, Any]]) -> str:
     if not history:
         return "No prior execution history."
     snippets: list[str] = []
-    for entry in history[-6:]:
+    for entry in history[-8:]:
         if not isinstance(entry, dict):
             continue
-        snippets.append(
-            f"[{entry.get('role', 'unknown')}] {entry.get('summary', '')}"
-        )
+        snippets.append(f"[{entry.get('role', 'unknown')}] {entry.get('summary', '')}")
     return "\n".join(snippets) if snippets else "No prior execution history."
 
 
 def _memory_summary(memory_results: list[dict[str, Any]]) -> str:
     if not memory_results:
         return "No relevant memory."
-    return "\n".join(
-        str(record.get("summary", "")) for record in memory_results[:5]
+    return "\n".join(str(record.get("summary", "")) for record in memory_results[:5])
+
+
+def _latest_observation_summary(context: DirectorContext) -> str:
+    if context.latest_observation is not None:
+        return context.latest_observation.summary
+    for entry in reversed(context.history):
+        if isinstance(entry, dict) and entry.get("role") == "verification":
+            return str(entry.get("summary", "No fresh observation summary yet.")).strip()
+    return "No fresh observation summary yet."
+
+
+def _core_task_started(history: list[dict[str, Any]]) -> bool:
+    for entry in history:
+        if not isinstance(entry, dict) or entry.get("role") != "verification":
+            continue
+        details = entry.get("details", {})
+        if not isinstance(details, dict):
+            continue
+        if bool(details.get("meaningful_change")):
+            return True
+        if details.get("created_objects") or details.get("moved_objects") or details.get("changed_objects"):
+            return True
+    return False
+
+
+def _derive_budget_state(context: DirectorContext, decision: ControllerDecision) -> BudgetState:
+    complexity = decision.complexity if decision.complexity in _TURN_BUDGETS else "medium"
+    turn_budget = _TURN_BUDGETS[complexity]
+    turns_used = max(min(context.iteration - 1, turn_budget), 0)
+    turns_remaining = max(turn_budget - turns_used, 0)
+    completion_mode_active = turns_used >= max(int(turn_budget * 0.75), 1)
+    return BudgetState(
+        complexity=complexity,
+        turn_budget=turn_budget,
+        turns_used=turns_used,
+        turns_remaining=turns_remaining,
+        completion_mode_active=completion_mode_active,
+        core_task_started=_core_task_started(context.history),
     )
 
 
-def _observation_summary(context: DirectorContext) -> str:
-    if context.latest_observation is None:
-        return "No fresh observation summary yet."
-    return context.latest_observation.summary
-
-
-def _build_director_prompt(context: DirectorContext, decision: ControllerDecision, tools: list[dict[str, Any]]) -> str:
+def _build_director_prompt(
+    context: DirectorContext,
+    decision: ControllerDecision,
+    budget_state: BudgetState,
+    tools: list[dict[str, Any]],
+) -> str:
     screenshot = context.screenshot or {}
+    controller_hint = decision.raw or {
+        "needs_scene_context": decision.needs_scene_context,
+        "needs_visual_feedback": decision.needs_visual_feedback,
+        "complexity": decision.complexity,
+    }
     return (
         f"User prompt:\n{context.user_prompt}\n\n"
-        f"Controller decision:\n{json.dumps(decision.raw or {'task_type': decision.task_type, 'needs_scene_context': decision.needs_scene_context, 'needs_visual_feedback': decision.needs_visual_feedback, 'complexity': decision.complexity}, indent=2)}\n\n"
+        f"Turn budget state:\n{json.dumps({'complexity': budget_state.complexity, 'turn_budget': budget_state.turn_budget, 'turns_used': budget_state.turns_used, 'turns_remaining': budget_state.turns_remaining, 'completion_mode_active': budget_state.completion_mode_active, 'core_task_started': budget_state.core_task_started}, indent=2)}\n\n"
+        f"Controller hints:\n{json.dumps(controller_hint, indent=2)}\n\n"
         f"Scene state:\n{_compact_scene_state(context.scene_state)}\n\n"
-        f"Latest observation:\n{_observation_summary(context)}\n\n"
+        f"Latest observation:\n{_latest_observation_summary(context)}\n\n"
         f"Recent history:\n{_history_summary(context.history)}\n\n"
         f"Memory:\n{_memory_summary(context.memory_results)}\n\n"
         f"Screenshot:\n{json.dumps({'available': screenshot.get('available', False), 'path': screenshot.get('path'), 'reason': screenshot.get('reason')}, indent=2)}\n\n"
@@ -191,11 +284,21 @@ class DirectorLoop:
         schemas.extend(_control_tools(execution_mode))
         return schemas
 
-    def _resolve_tool_call(self, tool_call: ToolCall, context: DirectorContext) -> tuple[list[dict[str, Any]], list[AssumptionRecord], dict[str, Any], str | None]:
+    def _resolve_single_tool_call(
+        self,
+        tool_call: ToolCall,
+        context: DirectorContext,
+        *,
+        step_index: int,
+    ) -> tuple[list[dict[str, Any]], list[AssumptionRecord], dict[str, Any], str | None]:
         resolver = ReferenceResolver(context)
         assumptions: list[AssumptionRecord] = []
-        metadata: dict[str, Any] = {"chosen_tool": tool_call.name}
+        metadata: dict[str, Any] = {
+            "chosen_tool": tool_call.name,
+            "action_family": _tool_family(tool_call.name),
+        }
         args = dict(tool_call.arguments)
+        action_id = f"step_{step_index}"
 
         if tool_call.name == "python.execute_blender_snippet":
             return [], assumptions, metadata, str(args.get("code", "")).strip()
@@ -211,15 +314,17 @@ class DirectorLoop:
             return (
                 [
                     {
-                        "action_id": f"director_{context.iteration}_create",
+                        "action_id": action_id,
                         "tool": tool_call.name,
-                        "params": {
-                            "type": primitive_type,
-                            "name": args.get("name"),
-                            "location": resolved_location.value,
-                            "scale": args.get("scale"),
-                            "rotation": args.get("rotation"),
-                        },
+                        "params": _drop_none_values(
+                            {
+                                "type": primitive_type,
+                                "name": args.get("name"),
+                                "location": resolved_location.value,
+                                "scale": args.get("scale"),
+                                "rotation": args.get("rotation"),
+                            }
+                        ),
                     }
                 ],
                 assumptions,
@@ -230,27 +335,51 @@ class DirectorLoop:
         if tool_call.name == "object.transform":
             target_result = resolver.resolve_target(args.get("target", args.get("object_name")))
             assumptions.extend(target_result.assumptions)
-            location_result = resolver.resolve_location(
-                "object.transform",
-                args.get("location"),
-                target_name=target_result.value if isinstance(target_result.value, str) else None,
-            ) if "location" in args and args.get("location") is not None else None
+            location_result = (
+                resolver.resolve_location(
+                    "object.transform",
+                    args.get("location"),
+                    target_name=target_result.value if isinstance(target_result.value, str) else None,
+                )
+                if args.get("location") is not None
+                else None
+            )
             if location_result is not None:
                 assumptions.extend(location_result.assumptions)
             metadata["reference_anchor"] = target_result.metadata.get("anchor")
-            params = {
-                "target": target_result.value,
-                "location": location_result.value if location_result is not None else args.get("location"),
-                "delta": args.get("delta"),
-                "rotation": args.get("rotation", args.get("rotation_euler")),
-                "scale": args.get("scale"),
-            }
             return (
                 [
                     {
-                        "action_id": f"director_{context.iteration}_transform",
+                        "action_id": action_id,
                         "tool": tool_call.name,
-                        "params": params,
+                        "params": _drop_none_values(
+                            {
+                                "target": target_result.value,
+                                "location": location_result.value if location_result is not None else args.get("location"),
+                                "delta": args.get("delta"),
+                                "rotation": args.get("rotation", args.get("rotation_euler")),
+                                "scale": args.get("scale"),
+                            }
+                        ),
+                    }
+                ],
+                assumptions,
+                metadata,
+                None,
+            )
+
+        if tool_call.name in {"object.transform_many", "object.delete_many", "object.distribute", "object.align"}:
+            objects_result = resolver.resolve_objects(args.get("targets", args.get("objects")))
+            assumptions.extend(objects_result.assumptions)
+            metadata["reference_anchor"] = objects_result.metadata.get("anchor")
+            params = dict(args)
+            params["targets"] = objects_result.value
+            return (
+                [
+                    {
+                        "action_id": action_id,
+                        "tool": tool_call.name,
+                        "params": _drop_none_values(params),
                     }
                 ],
                 assumptions,
@@ -265,13 +394,7 @@ class DirectorLoop:
             params = dict(args)
             params["target"] = target_result.value
             return (
-                [
-                    {
-                        "action_id": f"director_{context.iteration}_{tool_call.name.replace('.', '_')}",
-                        "tool": tool_call.name,
-                        "params": params,
-                    }
-                ],
+                [{"action_id": action_id, "tool": tool_call.name, "params": _drop_none_values(params)}],
                 assumptions,
                 metadata,
                 None,
@@ -284,12 +407,9 @@ class DirectorLoop:
             return (
                 [
                     {
-                        "action_id": f"director_{context.iteration}_group",
+                        "action_id": action_id,
                         "tool": tool_call.name,
-                        "params": {
-                            "objects": objects_result.value,
-                            "name": args.get("name"),
-                        },
+                        "params": _drop_none_values({"objects": objects_result.value, "name": args.get("name")}),
                     }
                 ],
                 assumptions,
@@ -297,64 +417,113 @@ class DirectorLoop:
                 None,
             )
 
-        if tool_call.name in {"light.create", "camera.ensure", "material.apply_basic"}:
-            target_result = resolver.resolve_target(args.get("target"))
-            assumptions.extend(target_result.assumptions)
-            resolved_location = None
-            if tool_call.name in {"light.create", "camera.ensure"}:
-                resolved_location = resolver.resolve_location(
-                    tool_call.name,
-                    args.get("location"),
-                    target_name=target_result.value if isinstance(target_result.value, str) else None,
-                )
-                assumptions.extend(resolved_location.assumptions)
-                metadata["reference_anchor"] = resolved_location.metadata.get("anchor")
-            params = dict(args)
-            params["target"] = target_result.value
-            if resolved_location is not None:
-                params["location"] = resolved_location.value
+        if tool_call.name == "object.parent":
+            parent_result = resolver.resolve_target(args.get("parent"))
+            child_result = resolver.resolve_objects(args.get("children", args.get("objects")))
+            assumptions.extend(parent_result.assumptions)
+            assumptions.extend(child_result.assumptions)
+            metadata["reference_anchor"] = parent_result.metadata.get("anchor") or child_result.metadata.get("anchor")
             return (
                 [
                     {
-                        "action_id": f"director_{context.iteration}_{tool_call.name.replace('.', '_')}",
+                        "action_id": action_id,
                         "tool": tool_call.name,
-                        "params": params,
+                        "params": _drop_none_values({"parent": parent_result.value, "children": child_result.value}),
                     }
                 ],
+                assumptions,
+                metadata,
+                None,
+            )
+
+        if tool_call.name in {"light.create", "camera.ensure", "light.adjust", "camera.adjust", "material.apply_basic", "object.keyframe"}:
+            target_key = "look_at" if tool_call.name == "camera.adjust" else "target"
+            target_result = resolver.resolve_target(args.get("target"))
+            if tool_call.name != "light.create":
+                assumptions.extend(target_result.assumptions)
+            resolved_location = None
+            if tool_call.name in {"light.create", "camera.ensure", "light.adjust", "camera.adjust"}:
+                target_name = target_result.value if isinstance(target_result.value, str) else None
+                resolved_location = resolver.resolve_location(tool_call.name, args.get("location"), target_name=target_name)
+                assumptions.extend(resolved_location.assumptions)
+                metadata["reference_anchor"] = resolved_location.metadata.get("anchor")
+            params = dict(args)
+            if tool_call.name in {"material.apply_basic", "object.keyframe", "light.adjust", "camera.adjust"}:
+                params["target"] = target_result.value
+            if resolved_location is not None:
+                params["location"] = resolved_location.value
+            if tool_call.name == "camera.adjust" and args.get("look_at") is not None:
+                look_at_result = resolver.resolve_target(args.get("look_at"))
+                assumptions.extend(look_at_result.assumptions)
+                params[target_key] = look_at_result.value
+            return (
+                [{"action_id": action_id, "tool": tool_call.name, "params": _drop_none_values(params)}],
                 assumptions,
                 metadata,
                 None,
             )
 
         return (
-            [
-                {
-                    "action_id": f"director_{context.iteration}_{tool_call.name.replace('.', '_')}",
-                    "tool": tool_call.name,
-                    "params": args,
-                }
-            ],
+            [{"action_id": action_id, "tool": tool_call.name, "params": _drop_none_values(args)}],
             assumptions,
             metadata,
             None,
         )
 
+    def _resolve_tool_calls(
+        self,
+        tool_calls: list[ToolCall],
+        context: DirectorContext,
+    ) -> tuple[list[dict[str, Any]], list[AssumptionRecord], dict[str, Any], str | None]:
+        actions: list[dict[str, Any]] = []
+        assumptions: list[AssumptionRecord] = []
+        reference_anchors: list[str | None] = []
+        action_families: list[str] = []
+        code: str | None = None
+
+        for step_index, tool_call in enumerate(tool_calls[:_BATCH_LIMIT], start=1):
+            resolved_actions, resolved_assumptions, metadata, resolved_code = self._resolve_single_tool_call(
+                tool_call,
+                context,
+                step_index=step_index,
+            )
+            actions.extend(resolved_actions)
+            assumptions.extend(resolved_assumptions)
+            reference_anchors.append(metadata.get("reference_anchor"))
+            if isinstance(metadata.get("action_family"), str):
+                action_families.append(metadata["action_family"])
+            if resolved_code:
+                code = resolved_code
+
+        return (
+            actions,
+            assumptions,
+            {
+                "reference_anchors": reference_anchors,
+                "action_families": action_families,
+                "batch_size": len(actions),
+            },
+            code,
+        )
+
     @staticmethod
     def _plan_lines(provider_result: ProviderResult, tool_calls: list[ToolCall]) -> list[str]:
         if tool_calls:
-            return [f"use {tool_calls[0].name} as the next step"]
+            return [f"execute a batch using {', '.join(tool.name for tool in tool_calls[:_BATCH_LIMIT])}"]
         if provider_result.assistant_text:
             return [provider_result.assistant_text]
         return ["decide the next best scene step"]
 
     @staticmethod
     def _intended_actions(tool_calls: list[ToolCall]) -> list[str]:
-        return [f"{tool.name}({tool.arguments})" for tool in tool_calls]
+        return [f"{tool.name}({tool.arguments})" for tool in tool_calls[:_BATCH_LIMIT]]
 
     def step(self, context: DirectorContext) -> DirectorTurn:
         controller_decision = call_controller(context.user_prompt, context.scene_state)
+        budget_state = context.budget_state or _derive_budget_state(context, controller_decision)
         tools = self._tool_schemas(context.execution_mode)
-        prompt_text = _build_director_prompt(context, controller_decision, tools)
+        prompt_text = _build_director_prompt(context, controller_decision, budget_state, tools)
+
         try:
             provider_result = call_director(prompt_text=prompt_text, tools=tools)
         except ProviderError as exc:
@@ -368,44 +537,12 @@ class DirectorLoop:
                 expected_outcome="No execution could be prepared.",
                 continue_loop=False,
                 error=str(exc),
-                metadata={},
+                metadata={"bottleneck_tags": ["provider_transport"], "budget_state": budget_state.__dict__},
             )
 
-        tool_calls = provider_result.tool_calls
-        if not tool_calls and provider_result.assistant_text:
-            return DirectorTurn(
-                status="complete",
-                message=provider_result.assistant_text,
-                narration=provider_result.assistant_text,
-                understanding="The Director concluded that no further action is required.",
-                plan=["finish the task"],
-                intended_actions=[],
-                expected_outcome=provider_result.assistant_text,
-                continue_loop=False,
-                provider=provider_result.provider,
-                model=provider_result.model,
-                metadata={"provider_result": provider_result.raw_response},
-            )
-
-        if not tool_calls:
-            return DirectorTurn(
-                status="error",
-                message="The Director did not produce a usable tool call or completion signal.",
-                narration="The Director stalled without choosing a next action.",
-                understanding="The provider response was not actionable.",
-                plan=["surface an execution error"],
-                intended_actions=[],
-                expected_outcome="No execution could be prepared.",
-                continue_loop=False,
-                error="No usable tool call returned",
-                provider=provider_result.provider,
-                model=provider_result.model,
-                metadata={"provider_result": provider_result.raw_response},
-            )
-
-        first_tool = tool_calls[0]
-        if first_tool.name == "task.complete":
-            summary = str(first_tool.arguments.get("summary", "")).strip() or provider_result.assistant_text or "Task complete."
+        tool_calls = provider_result.tool_calls[:_BATCH_LIMIT]
+        if tool_calls and tool_calls[0].name == "task.complete":
+            summary = str(tool_calls[0].arguments.get("summary", "")).strip() or provider_result.assistant_text or "Task complete."
             return DirectorTurn(
                 status="complete",
                 message=summary,
@@ -417,11 +554,17 @@ class DirectorLoop:
                 continue_loop=False,
                 provider=provider_result.provider,
                 model=provider_result.model,
-                metadata={"provider_result": provider_result.raw_response},
+                metadata={
+                    "provider_result": provider_result.raw_response,
+                    "provider_chain": provider_result.provider_chain,
+                    "budget_state": budget_state.__dict__,
+                    "bottleneck_tags": [],
+                },
             )
-        if first_tool.name == "task.clarify":
-            question = str(first_tool.arguments.get("question", "")).strip() or "I need clarification before continuing."
-            reason = str(first_tool.arguments.get("reason", "")).strip()
+
+        if tool_calls and tool_calls[0].name == "task.clarify":
+            question = str(tool_calls[0].arguments.get("question", "")).strip() or "I need clarification before continuing."
+            reason = str(tool_calls[0].arguments.get("reason", "")).strip()
             return DirectorTurn(
                 status="clarify",
                 message=question,
@@ -434,38 +577,69 @@ class DirectorLoop:
                 question=question,
                 provider=provider_result.provider,
                 model=provider_result.model,
-                metadata={"provider_result": provider_result.raw_response},
+                metadata={
+                    "provider_result": provider_result.raw_response,
+                    "provider_chain": provider_result.provider_chain,
+                    "budget_state": budget_state.__dict__,
+                    "bottleneck_tags": ["tool_gap"] if reason else [],
+                },
             )
 
-        actions, assumptions, metadata, code = self._resolve_tool_call(first_tool, context)
+        if not tool_calls:
+            return DirectorTurn(
+                status="error",
+                message="The Director did not produce a usable action batch or completion signal.",
+                narration="The Director stalled without choosing a next action.",
+                understanding="The provider response was not actionable.",
+                plan=["surface an execution error"],
+                intended_actions=[],
+                expected_outcome="No execution could be prepared.",
+                continue_loop=False,
+                error="No usable tool call returned",
+                provider=provider_result.provider,
+                model=provider_result.model,
+                metadata={
+                    "provider_result": provider_result.raw_response,
+                    "provider_chain": provider_result.provider_chain,
+                    "budget_state": budget_state.__dict__,
+                    "bottleneck_tags": ["provider_transport"],
+                },
+            )
+
+        actions, assumptions, metadata, code = self._resolve_tool_calls(tool_calls, context)
         metadata = dict(metadata)
         metadata.update(
             {
                 "provider": provider_result.provider,
                 "model": provider_result.model,
                 "provider_result": provider_result.raw_response,
+                "provider_chain": provider_result.provider_chain or [f"{provider_result.provider}:{provider_result.model}"],
                 "code": code,
                 "assumptions": [
                     {"key": item.key, "value": item.value, "reason": item.reason}
                     for item in assumptions
                 ],
+                "actions": actions,
+                "budget_state": budget_state.__dict__,
+                "bottleneck_tags": [],
+                "observation_summary": _latest_observation_summary(context),
+                "completion_mode_active": budget_state.completion_mode_active,
+                "turn_index": context.iteration,
             }
         )
         return DirectorTurn(
             status="ok",
             message=provider_result.assistant_text or "Prepared the next director step.",
             narration=provider_result.assistant_text or "Prepared the next director step.",
-            understanding=(
-                "The Director selected the next bounded action using scene context and recent observations."
-            ),
+            understanding="The Director selected the next bounded batch using scene context, observations, and the turn budget.",
             plan=self._plan_lines(provider_result, tool_calls),
             intended_actions=self._intended_actions(tool_calls),
-            expected_outcome=provider_result.assistant_text or "The scene should move one step closer to the request.",
+            expected_outcome=provider_result.assistant_text or "The scene should move closer to the request.",
             continue_loop=True,
             assumptions=assumptions,
-            tool_calls=[first_tool],
+            tool_calls=tool_calls,
             code=code,
             provider=provider_result.provider,
             model=provider_result.model,
-            metadata=metadata | {"actions": actions},
+            metadata=metadata,
         )

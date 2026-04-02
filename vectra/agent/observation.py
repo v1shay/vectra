@@ -26,6 +26,61 @@ def _approx_bounds(obj: Any) -> dict[str, list[float]]:
     }
 
 
+def _material_names(obj: Any) -> list[str]:
+    materials = getattr(getattr(obj, "data", None), "materials", None)
+    if materials is None:
+        active = getattr(obj, "active_material", None)
+        return [active.name] if getattr(active, "name", None) else []
+    return [
+        material.name
+        for material in materials
+        if getattr(material, "name", None)
+    ]
+
+
+def _keyframe_count(obj: Any) -> int:
+    animation_data = getattr(obj, "animation_data", None)
+    action = getattr(animation_data, "action", None)
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves is None:
+        return 0
+    total = 0
+    for curve in fcurves:
+        total += len(getattr(curve, "keyframe_points", []))
+    return total
+
+
+def _scene_centroid(objects: list[dict[str, Any]]) -> list[float]:
+    if not objects:
+        return [0.0, 0.0, 0.0]
+    count = float(len(objects))
+    return [
+        sum(float(obj["location"][index]) for obj in objects) / count
+        for index in range(3)
+    ]
+
+
+def _scene_bounds(objects: list[dict[str, Any]]) -> dict[str, list[float]]:
+    if not objects:
+        return {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
+    mins = [min(float(obj["bounds"]["min"][index]) for obj in objects) for index in range(3)]
+    maxes = [max(float(obj["bounds"]["max"][index]) for obj in objects) for index in range(3)]
+    return {"min": mins, "max": maxes}
+
+
+def _collection_groups(scene: Any) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for collection in getattr(getattr(scene, "collection", None), "children_recursive", []):
+        object_names = [
+            obj.name
+            for obj in getattr(collection, "objects", [])
+            if getattr(obj, "name", None)
+        ]
+        if object_names:
+            groups.append({"name": collection.name, "object_names": object_names})
+    return groups
+
+
 def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
     if bpy is None:
         raise RuntimeError("Blender Python API is unavailable")
@@ -34,31 +89,64 @@ def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
     objects = []
     scene_objects = getattr(scene, "objects", [])
     for obj in scene_objects:
-        objects.append(
-            {
-                "name": obj.name,
-                "type": obj.type,
-                "selected": bool(obj.select_get()),
-                "active": active_object is not None and obj == active_object,
-                "location": _vector_to_list(obj.location),
-                "rotation_euler": _vector_to_list(obj.rotation_euler),
-                "scale": _vector_to_list(obj.scale),
-                "dimensions": _vector_to_list(getattr(obj, "dimensions", (2.0, 2.0, 2.0))),
-                "bounds": _approx_bounds(obj),
-                "parent": getattr(getattr(obj, "parent", None), "name", None),
-                "children": [child.name for child in getattr(obj, "children", [])],
-                "collection_names": [
-                    collection.name
-                    for collection in getattr(obj, "users_collection", [])
-                    if hasattr(collection, "name")
-                ],
-            }
-        )
+        location = _vector_to_list(obj.location)
+        rotation = _vector_to_list(obj.rotation_euler)
+        scale = _vector_to_list(obj.scale)
+        dimensions = _vector_to_list(getattr(obj, "dimensions", (2.0, 2.0, 2.0)))
+        bounds = _approx_bounds(obj)
+        materials = _material_names(obj)
+        keyframe_count = _keyframe_count(obj)
+        object_record = {
+            "name": obj.name,
+            "type": obj.type,
+            "selected": bool(obj.select_get()),
+            "active": active_object is not None and obj == active_object,
+            "location": location,
+            "rotation_euler": rotation,
+            "scale": scale,
+            "dimensions": dimensions,
+            "bounds": bounds,
+            "parent": getattr(getattr(obj, "parent", None), "name", None),
+            "children": [child.name for child in getattr(obj, "children", [])],
+            "collection_names": [
+                collection.name
+                for collection in getattr(obj, "users_collection", [])
+                if hasattr(collection, "name")
+            ],
+            "material_names": materials,
+            "has_animation": keyframe_count > 0,
+            "keyframe_count": keyframe_count,
+        }
+        if getattr(obj, "type", "") == "LIGHT":
+            object_record["light_energy"] = float(getattr(getattr(obj, "data", None), "energy", 0.0))
+            object_record["light_type"] = str(getattr(getattr(obj, "data", None), "type", ""))
+        if getattr(obj, "type", "") == "CAMERA":
+            object_record["camera_lens"] = float(getattr(getattr(obj, "data", None), "lens", 0.0))
+        objects.append(object_record)
+
+    active_camera = getattr(scene, "camera", None)
+    lights = [
+        {
+            "name": obj["name"],
+            "type": obj.get("light_type"),
+            "energy": obj.get("light_energy", 0.0),
+            "location": obj["location"],
+        }
+        for obj in objects
+        if obj.get("type") == "LIGHT"
+    ]
+    centroid = _scene_centroid(objects)
+    bounds = _scene_bounds(objects)
 
     return {
         "active_object": active_object.name if active_object else None,
         "selected_objects": [obj.name for obj in context.selected_objects],
         "current_frame": scene.frame_current,
+        "active_camera": active_camera.name if active_camera is not None else None,
+        "scene_centroid": centroid,
+        "scene_bounds": bounds,
+        "groups": _collection_groups(scene),
+        "lights": lights,
         "objects": objects,
     }
 

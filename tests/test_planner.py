@@ -33,13 +33,12 @@ def test_controller_uses_xai_profile(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda config, instructions, user_input, tools, timeout, max_retries: ProviderResult(
             provider=config.provider,
             model=config.model,
-            assistant_text='{"task_type":"scene_creation","needs_scene_context":true,"needs_visual_feedback":true,"complexity":"medium"}',
+            assistant_text='{"needs_scene_context":true,"needs_visual_feedback":true,"complexity":"medium"}',
         ),
     )
 
     decision = call_controller("make a cool scene", {"objects": []})
 
-    assert decision.task_type == "scene_creation"
     assert decision.needs_scene_context is True
     assert decision.needs_visual_feedback is True
     assert decision.provider == "xai-controller"

@@ -107,3 +107,21 @@ class FrameViewTool(BaseTool):
         except RuntimeError:
             return ToolExecutionResult(outputs={}, message="Frame view was unavailable in the current UI context")
         return ToolExecutionResult(outputs={}, message="Framed the current view")
+
+
+@register_tool
+class SetFrameTool(BaseTool):
+    name = "scene.set_frame"
+    description = "Set the active scene frame for animation work."
+    input_schema = {
+        "frame": {"type": "integer", "required": False},
+    }
+
+    def execute(self, context: Any, params: dict[str, Any]) -> ToolExecutionResult:
+        if bpy is None:
+            raise ToolExecutionError("Blender Python API is unavailable")
+        frame = params.get("frame", 1)
+        if isinstance(frame, bool):
+            raise ToolValidationError("'frame' must be an integer")
+        active_scene(context).frame_set(int(frame))
+        return ToolExecutionResult(outputs={"frame": int(frame)}, message=f"Moved to frame {int(frame)}")

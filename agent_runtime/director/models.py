@@ -7,12 +7,10 @@ from typing import Any, Literal
 ExecutionMode = Literal["vectra-dev", "vectra-code"]
 DirectorStatus = Literal["ok", "clarify", "complete", "error"]
 ComplexityLevel = Literal["low", "medium", "high"]
-TaskType = Literal["scene_creation", "scene_modification", "scene_refinement", "unknown"]
 
 
 @dataclass(frozen=True)
 class ControllerDecision:
-    task_type: TaskType = "unknown"
     needs_scene_context: bool = True
     needs_visual_feedback: bool = False
     complexity: ComplexityLevel = "medium"
@@ -40,7 +38,19 @@ class ObservationSummary:
     created_objects: list[str] = field(default_factory=list)
     removed_objects: list[str] = field(default_factory=list)
     moved_objects: list[str] = field(default_factory=list)
+    changed_objects: list[str] = field(default_factory=list)
     screenshot_available: bool = False
+    meaningful_change: bool = False
+
+
+@dataclass(frozen=True)
+class BudgetState:
+    complexity: ComplexityLevel
+    turn_budget: int
+    turns_used: int
+    turns_remaining: int
+    completion_mode_active: bool
+    core_task_started: bool
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,7 @@ class ProviderResult:
     assistant_text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw_response: dict[str, Any] = field(default_factory=dict)
+    provider_chain: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -72,6 +83,7 @@ class DirectorContext:
     execution_mode: ExecutionMode
     memory_results: list[dict[str, Any]] = field(default_factory=list)
     latest_observation: ObservationSummary | None = None
+    budget_state: BudgetState | None = None
 
 
 @dataclass(frozen=True)

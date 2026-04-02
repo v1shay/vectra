@@ -66,6 +66,14 @@ def test_tool_registry_discover_loads_director_tool_surface() -> None:
     assert "material.apply_basic" in discovered_tools
     assert "scene.get_state" in discovered_tools
     assert "scene.capture_view" in discovered_tools
+    assert "object.transform_many" in discovered_tools
+    assert "object.delete_many" in discovered_tools
+    assert "object.distribute" in discovered_tools
+    assert "object.align" in discovered_tools
+    assert "scene.set_frame" in discovered_tools
+    assert "object.keyframe" in discovered_tools
+    assert "light.adjust" in discovered_tools
+    assert "camera.adjust" in discovered_tools
 
 
 def test_tool_registry_unknown_tool_lookup_raises_error() -> None:

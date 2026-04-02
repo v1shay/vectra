@@ -35,6 +35,23 @@ def _object_by_name(scene_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def _group_by_name(scene_state: dict[str, Any]) -> dict[str, list[str]]:
+    groups = scene_state.get("groups", [])
+    if not isinstance(groups, list):
+        return {}
+    resolved: dict[str, list[str]] = {}
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        name = group.get("name")
+        object_names = group.get("object_names")
+        if isinstance(name, str) and isinstance(object_names, list):
+            cleaned = [value for value in object_names if isinstance(value, str) and value.strip()]
+            if cleaned:
+                resolved[name] = cleaned
+    return resolved
+
+
 def _vector3(value: Any) -> list[float] | None:
     if not isinstance(value, list) or len(value) != 3:
         return None
@@ -122,6 +139,7 @@ class ReferenceResolver:
     def __init__(self, context: DirectorContext) -> None:
         self.context = context
         self._scene_map = _object_by_name(context.scene_state)
+        self._group_map = _group_by_name(context.scene_state)
 
     def resolve_target(self, raw_target: Any) -> ResolutionResult:
         assumptions: list[AssumptionRecord] = []
@@ -132,6 +150,16 @@ class ReferenceResolver:
             if exact is not None:
                 metadata["anchor"] = stripped
                 return ResolutionResult(stripped, assumptions, metadata)
+            if stripped in self._group_map:
+                assumptions.append(
+                    AssumptionRecord(
+                        key="target",
+                        value=self._group_map[stripped][0],
+                        reason=f"Resolved group '{stripped}' to its first object for a single-target operation.",
+                    )
+                )
+                metadata["anchor"] = stripped
+                return ResolutionResult(self._group_map[stripped][0], assumptions, metadata)
 
             lowered = stripped.lower()
             if lowered in _VAGUE_REFERENCES:
@@ -256,6 +284,17 @@ class ReferenceResolver:
                 if isinstance(target.value, str):
                     resolved.append(target.value)
                     assumptions.extend(target.assumptions)
+        elif isinstance(raw_objects, str) and raw_objects.strip() in self._group_map:
+            group_name = raw_objects.strip()
+            assumptions.append(
+                AssumptionRecord(
+                    key="objects",
+                    value=self._group_map[group_name],
+                    reason=f"Resolved group '{group_name}' to its member objects.",
+                )
+            )
+            metadata["anchor"] = group_name
+            return ResolutionResult(self._group_map[group_name], assumptions, metadata)
         if resolved:
             metadata["anchor"] = "explicit_or_resolved"
             return ResolutionResult(resolved, assumptions, metadata)
@@ -283,5 +322,17 @@ class ReferenceResolver:
             )
             metadata["anchor"] = "last_created"
             return ResolutionResult(last_objects, assumptions, metadata)
+
+        if self._group_map:
+            first_group_name = next(iter(self._group_map))
+            assumptions.append(
+                AssumptionRecord(
+                    key="objects",
+                    value=self._group_map[first_group_name],
+                    reason=f"Used the current group '{first_group_name}' as the best available object set.",
+                )
+            )
+            metadata["anchor"] = first_group_name
+            return ResolutionResult(self._group_map[first_group_name], assumptions, metadata)
 
         return ResolutionResult([], assumptions, {"anchor": "none"})

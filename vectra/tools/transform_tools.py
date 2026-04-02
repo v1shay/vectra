@@ -8,7 +8,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in plain Python test
     bpy = None
 
 from .base import BaseTool, ToolExecutionError, ToolExecutionResult, ToolValidationError
-from .helpers import resolve_object, validate_vector3
+from .helpers import resolve_object, resolve_objects, validate_vector3
 from .registry import register_tool
 
 
@@ -36,9 +36,9 @@ class TransformObjectTool(BaseTool):
         normalized: dict[str, Any] = {}
         if isinstance(target, str) and target.strip():
             normalized["target"] = target.strip()
-        if "location" in params:
+        if "location" in params and params["location"] is not None:
             normalized["location"] = validate_vector3(params["location"], "location")
-        if "delta" in params:
+        if "delta" in params and params["delta"] is not None:
             normalized["delta"] = validate_vector3(params["delta"], "delta")
         rotation_value = params.get("rotation", params.get("rotation_euler"))
         if rotation_value is not None:
@@ -46,7 +46,7 @@ class TransformObjectTool(BaseTool):
                 rotation_value,
                 "rotation",
             )
-        if "scale" in params:
+        if "scale" in params and params["scale"] is not None:
             normalized["scale"] = validate_vector3(params["scale"], "scale")
 
         if len(normalized) == 0:
@@ -91,4 +91,76 @@ class TransformObjectTool(BaseTool):
         return ToolExecutionResult(
             outputs={"object_name": obj.name, "object_names": [obj.name]},
             message=f"Transformed object '{obj.name}'",
+        )
+
+
+@register_tool
+class TransformManyObjectsTool(BaseTool):
+    name = "object.transform_many"
+    description = "Apply the same transform delta or adjustment across several objects at once."
+    input_schema = {
+        "targets": {"type": "string_array", "required": False},
+        "objects": {"type": "string_array", "required": False},
+        "location": {"type": "vector3", "required": False},
+        "delta": {"type": "vector3", "required": False},
+        "rotation": {"type": "vector3", "required": False},
+        "rotation_euler": {"type": "vector3", "required": False},
+        "scale": {"type": "vector3", "required": False},
+    }
+
+    def validate_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = super().validate_params(params)
+        normalized: dict[str, Any] = {}
+        targets = params.get("targets", params.get("objects"))
+        if isinstance(targets, list):
+            normalized["targets"] = [str(item).strip() for item in targets if str(item).strip()]
+        if "location" in params and params["location"] is not None:
+            normalized["location"] = validate_vector3(params["location"], "location")
+        if "delta" in params and params["delta"] is not None:
+            normalized["delta"] = validate_vector3(params["delta"], "delta")
+        rotation_value = params.get("rotation", params.get("rotation_euler"))
+        if rotation_value is not None:
+            normalized["rotation"] = validate_vector3(rotation_value, "rotation")
+        if "scale" in params and params["scale"] is not None:
+            normalized["scale"] = validate_vector3(params["scale"], "scale")
+        if not any(key in normalized for key in {"location", "delta", "rotation", "scale"}):
+            raise ToolValidationError(
+                "At least one transform field ('location', 'delta', 'rotation', or 'scale') is required"
+            )
+        return normalized
+
+    def execute(self, context: Any, params: dict[str, Any]) -> ToolExecutionResult:
+        if bpy is None:
+            raise ToolExecutionError("Blender Python API is unavailable")
+
+        validated = self.validate_params(params)
+        objects = resolve_objects(context, validated.get("targets"))
+        if not objects:
+            raise ToolExecutionError("No transform targets could be resolved")
+
+        touched: list[str] = []
+        for obj in objects:
+            if "location" in validated:
+                obj.location = validated["location"]
+            if "delta" in validated:
+                current = [float(component) for component in obj.location[:3]]
+                delta = validated["delta"]
+                obj.location = (
+                    current[0] + delta[0],
+                    current[1] + delta[1],
+                    current[2] + delta[2],
+                )
+            if "rotation" in validated:
+                obj.rotation_euler = validated["rotation"]
+            if "scale" in validated:
+                obj.scale = validated["scale"]
+            touched.append(obj.name)
+
+        view_layer = getattr(bpy.context, "view_layer", None)
+        if view_layer is not None:
+            view_layer.update()
+
+        return ToolExecutionResult(
+            outputs={"object_name": touched[0], "object_names": touched},
+            message=f"Transformed {len(touched)} object(s)",
         )
