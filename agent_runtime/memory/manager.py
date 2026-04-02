@@ -41,6 +41,23 @@ class MemoryManager:
     def query_memory(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         return self._provider.query_memory(query, top_k=top_k)
 
+    def store_turn(self, record: dict[str, Any]) -> None:
+        self.add_memory(record)
+
+    def query_relevant(
+        self,
+        prompt: str,
+        scene_state: dict[str, Any] | None = None,
+        *,
+        top_k: int = 5,
+    ) -> list[dict[str, Any]]:
+        scene_state = scene_state or {}
+        scene_hint = ""
+        objects = scene_state.get("objects")
+        if isinstance(objects, list) and objects:
+            scene_hint = f" objects={len(objects)}"
+        return self.query_memory(f"{prompt}{scene_hint}".strip(), top_k=top_k)
+
     def clear_memory(self) -> None:
         self._provider.clear_memory()
 

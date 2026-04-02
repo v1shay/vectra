@@ -74,11 +74,13 @@ def test_bridge_client_talks_to_live_backend(live_server: str) -> None:
     }
 
     assert health_check(base_url=live_server) == {"status": "ok"}
-    assert create_task(payload, base_url=live_server) == {
-        "status": "ok",
-        "message": "planned for Add a light:1",
-        "actions": CREATE_CUBE_ACTIONS,
-    }
+    response = create_task(payload, base_url=live_server)
+
+    assert response["status"] == "ok"
+    assert response["message"] == "planned for Add a light:1"
+    assert response["actions"] == CREATE_CUBE_ACTIONS
+    assert response["assumptions"] == []
+    assert response["metadata"] == {}
 
 
 def test_bridge_client_raises_clear_error_when_backend_is_offline() -> None:

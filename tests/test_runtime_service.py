@@ -84,3 +84,55 @@ def test_ensure_local_backend_reports_actionable_error_when_repo_is_missing(
             base_url="http://127.0.0.1:8000",
             repo_root_hint="/tmp/missing-vectra",
         )
+
+
+def test_manual_start_command_uses_repo_root_package_entrypoint() -> None:
+    command = runtime_service._manual_start_command("/tmp/vectra", "http://127.0.0.1:8000")
+
+    assert "cd /tmp/vectra &&" in command
+    assert "uvicorn agent_runtime.main:app --reload" in command
+
+
+def test_start_backend_process_uses_package_entrypoint_from_repo_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "vectra"
+    repo_root.mkdir()
+    venv_bin = repo_root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    python_bin = venv_bin / "python"
+    python_bin.write_text("", encoding="utf-8")
+
+    launched: dict[str, object] = {}
+
+    class DummyProcess:
+        def poll(self) -> None:
+            return None
+
+    def fake_popen(command, cwd, env, stdout, stderr, text, start_new_session):
+        launched["command"] = command
+        launched["cwd"] = cwd
+        launched["env"] = env
+        launched["stdout"] = stdout
+        launched["stderr"] = stderr
+        launched["text"] = text
+        launched["start_new_session"] = start_new_session
+        return DummyProcess()
+
+    monkeypatch.setattr(runtime_service.subprocess, "Popen", fake_popen)
+
+    runtime_service._start_backend_process(repo_root, "http://127.0.0.1:8000")
+
+    assert launched["cwd"] == repo_root
+    assert launched["command"] == [
+        str(python_bin),
+        "-m",
+        "uvicorn",
+        "agent_runtime.main:app",
+        "--reload",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+    ]

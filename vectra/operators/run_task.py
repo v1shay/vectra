@@ -21,7 +21,7 @@ logger = get_vectra_logger("vectra.blender")
 
 DEFAULT_BASE_URL = os.getenv("VECTRA_BASE_URL", "http://127.0.0.1:8000").strip() or "http://127.0.0.1:8000"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
-MAX_AGENT_ITERATIONS = 10
+MAX_AGENT_ITERATIONS = 20
 ALLOWED_PHASES = {"idle", "sending", "working", "clarifying", "success", "error"}
 DEFAULT_EXECUTION_MODE = "vectra-dev"
 
@@ -55,7 +55,10 @@ def _build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
 
 
 def _is_agent_mode_enabled() -> bool:
-    return os.getenv("VECTRA_AGENT_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    raw_value = os.getenv("VECTRA_AGENT_MODE", "").strip().lower()
+    if not raw_value:
+        return True
+    return raw_value in {"1", "true", "yes", "on"}
 
 
 def _normalize_execution_mode(raw_value: Any) -> str:
@@ -276,10 +279,19 @@ def _handle_agent_execution(scene: bpy.types.Scene, response: dict[str, Any]) ->
     if kind == "tool_actions":
         actions = execution_payload.get("actions", [])
         report = _get_execution_engine().run(bpy.context, actions)
+        affected_object_names = [
+            result.outputs.get("object_name")
+            for result in report.results
+            if result.success and isinstance(result.outputs, dict) and isinstance(result.outputs.get("object_name"), str)
+        ]
         return report.success, report.message, {
             "kind": kind,
             "results": [result.__dict__ for result in report.results],
             "actions": actions,
+            "metadata": {
+                "affected_object_names": affected_object_names,
+                **(execution_payload.get("metadata", {}) if isinstance(execution_payload.get("metadata"), dict) else {}),
+            },
         }
 
     if kind == "console_code":
@@ -362,9 +374,18 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
         return None
 
     narration = str(response.get("narration", "")).strip()
+    assumptions = response.get("assumptions", [])
     if narration:
         scene.vectra_status = narration
         _append_transcript(scene, narration)
+    if isinstance(assumptions, list):
+        assumption_lines = [
+            f"Assumption: {item.get('reason', '')}"
+            for item in assumptions
+            if isinstance(item, dict) and str(item.get("reason", "")).strip()
+        ]
+        for line in assumption_lines[:3]:
+            _append_transcript(scene, line)
 
     state.history.append(
         _history_entry(
@@ -375,6 +396,7 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
                 "understanding": response.get("understanding", ""),
                 "plan": response.get("plan", []),
                 "intended_actions": response.get("intended_actions", []),
+                "assumptions": assumptions if isinstance(assumptions, list) else [],
                 "preferred_execution_mode": response.get("preferred_execution_mode", DEFAULT_EXECUTION_MODE),
             },
         )

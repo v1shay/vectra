@@ -64,6 +64,8 @@ def create_task(request: TaskCreateRequest) -> TaskCreateResponse:
         status=planner_result.status,
         message=planner_result.message,
         actions=_build_action_models(planner_result.actions),
+        assumptions=planner_result.assumptions,
+        metadata=planner_result.metadata,
     )
     log_structured(logger, "task_response", model_to_dict(response))
     return response
