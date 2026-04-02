@@ -30,6 +30,7 @@ class ReasoningStep:
     expected_outcome: str
     preferred_execution_mode: ExecutionMode
     continue_loop: bool
+    assumptions: list[dict[str, Any]] = field(default_factory=list)
     question: str | None = None
     error: str | None = None
     uncertainty_notes: list[str] = field(default_factory=list)

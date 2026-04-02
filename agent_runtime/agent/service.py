@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
-
 from agent_runtime.models import (
     AgentStepRequest,
     AgentStepResponse,
+    AssumptionModel,
     ExecutionPayloadModel,
-    HistoryEntryModel,
-    ScreenshotModel,
 )
 from agent_runtime.utils import model_to_dict
 from agent_runtime.memory import MemoryManager
@@ -23,7 +20,11 @@ class AgentService:
 
     def _context_from_request(self, request: AgentStepRequest) -> AgentContext:
         prompt = request.prompt.strip()
-        memory_results = self.memory_manager.query_memory(prompt, top_k=5)
+        memory_results = self.memory_manager.query_relevant(
+            prompt,
+            model_to_dict(request).get("scene_state", {}),
+            top_k=5,
+        )
         return AgentContext(
             user_prompt=prompt,
             scene_state=model_to_dict(request).get("scene_state", {}),
@@ -38,13 +39,14 @@ class AgentService:
         context = self._context_from_request(request)
         reasoning = reason_step(context)
         instruction = interpret_reasoning(reasoning, context)
-        return AgentStepResponse(
+        response = AgentStepResponse(
             status=reasoning.status,
             message=reasoning.narration or reasoning.expected_outcome,
             narration=reasoning.narration,
             understanding=reasoning.understanding,
             plan=list(reasoning.plan),
             intended_actions=list(reasoning.intended_actions),
+            assumptions=[AssumptionModel.model_validate(item) for item in reasoning.assumptions],
             uncertainty_notes=list(reasoning.uncertainty_notes),
             preferred_execution_mode=reasoning.preferred_execution_mode,
             continue_loop=reasoning.continue_loop,
@@ -60,3 +62,14 @@ class AgentService:
                 metadata=instruction.metadata,
             ),
         )
+        self.memory_manager.store_turn(
+            {
+                "prompt": context.user_prompt,
+                "summary": response.message,
+                "assumptions": [item.model_dump() for item in response.assumptions],
+                "actions": [item.model_dump() for item in response.execution.actions],
+                "observation_summary": "",
+                "category": "director_loop",
+            }
+        )
+        return response

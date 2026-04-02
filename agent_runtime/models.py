@@ -21,10 +21,18 @@ class ActionModel(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class AssumptionModel(BaseModel):
+    key: str
+    value: Any = None
+    reason: str = ""
+
+
 class TaskCreateResponse(BaseModel):
     status: str = "ok"
     message: str = "planned"
     actions: list[ActionModel] = Field(default_factory=list)
+    assumptions: list[AssumptionModel] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 ExecutionMode = Literal["vectra-dev", "vectra-code"]
@@ -70,6 +78,7 @@ class AgentStepResponse(BaseModel):
     understanding: str = ""
     plan: list[str] = Field(default_factory=list)
     intended_actions: list[str] = Field(default_factory=list)
+    assumptions: list[AssumptionModel] = Field(default_factory=list)
     uncertainty_notes: list[str] = Field(default_factory=list)
     preferred_execution_mode: ExecutionMode = "vectra-dev"
     continue_loop: bool = False

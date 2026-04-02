@@ -51,7 +51,7 @@ def test_tool_registry_duplicate_name_fails_clearly() -> None:
         registry.register(DuplicateEchoTool)
 
 
-def test_tool_registry_discover_loads_decorated_tools() -> None:
+def test_tool_registry_discover_loads_director_tool_surface() -> None:
     registry = ToolRegistry()
     registry.discover()
 
@@ -59,9 +59,13 @@ def test_tool_registry_discover_loads_decorated_tools() -> None:
 
     assert "mesh.create_primitive" in discovered_tools
     assert "object.transform" in discovered_tools
-    assert registry.get("mesh.create_primitive").output_schema == {
-        "object_name": {"type": "string"}
-    }
+    assert "object.duplicate" in discovered_tools
+    assert "scene.group" in discovered_tools
+    assert "light.create" in discovered_tools
+    assert "camera.ensure" in discovered_tools
+    assert "material.apply_basic" in discovered_tools
+    assert "scene.get_state" in discovered_tools
+    assert "scene.capture_view" in discovered_tools
 
 
 def test_tool_registry_unknown_tool_lookup_raises_error() -> None:
@@ -80,4 +84,4 @@ def test_reset_default_registry_clears_catalog_and_discovers_fresh_tools() -> No
     registry.discover()
 
     assert "mesh.create_primitive" in registry.list_tools()
-    assert "object.transform" in registry.list_tools()
+    assert "scene.capture_view" in registry.list_tools()

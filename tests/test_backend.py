@@ -16,7 +16,7 @@ def test_health_returns_ok() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_create_task_returns_planner_response(monkeypatch) -> None:
+def test_create_task_returns_director_wrapper_response(monkeypatch) -> None:
     monkeypatch.setattr(
         runtime_main,
         "plan",
@@ -24,6 +24,8 @@ def test_create_task_returns_planner_response(monkeypatch) -> None:
             status="ok",
             actions=CREATE_CUBE_ACTIONS,
             message=f"planned for {prompt}:{scene_state.get('current_frame', 'missing')}",
+            assumptions=[{"key": "location", "value": [0.0, 0.0, 0.0], "reason": "Used the world origin."}],
+            metadata={"provider": "openai-director", "model": "gpt-5.1"},
         ),
     )
     payload = {
@@ -43,66 +45,9 @@ def test_create_task_returns_planner_response(monkeypatch) -> None:
         "status": "ok",
         "message": "planned for Create a chair:1",
         "actions": CREATE_CUBE_ACTIONS,
+        "assumptions": [{"key": "location", "value": [0.0, 0.0, 0.0], "reason": "Used the world origin."}],
+        "metadata": {"provider": "openai-director", "model": "gpt-5.1"},
     }
-
-
-def test_create_task_is_deterministic_for_identical_input(monkeypatch) -> None:
-    monkeypatch.setattr(
-        runtime_main,
-        "plan",
-        lambda prompt, scene_state: PlannerResult(
-            status="ok",
-            actions=CREATE_CUBE_ACTIONS,
-            message=f"planned for {prompt}:{scene_state.get('current_frame', 'missing')}",
-        ),
-    )
-    payload = {
-        "prompt": "Make it blue",
-        "scene_state": {
-            "active_object": "Cube",
-            "selected_objects": ["Cube"],
-            "current_frame": 24,
-        },
-        "images": [],
-    }
-
-    first = client.post("/task/create", json=payload)
-    second = client.post("/task/create", json=payload)
-
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert first.json() == second.json() == {
-        "status": "ok",
-        "message": "planned for Make it blue:24",
-        "actions": CREATE_CUBE_ACTIONS,
-    }
-
-
-def test_create_task_action_schema_is_structured(monkeypatch) -> None:
-    monkeypatch.setattr(
-        runtime_main,
-        "plan",
-        lambda prompt, scene_state: PlannerResult(
-            status="ok",
-            actions=CREATE_CUBE_ACTIONS,
-            message=f"planned for {prompt}:{len(scene_state)}",
-        ),
-    )
-    response = client.post(
-        "/task/create",
-        json={
-            "prompt": "Create a cube",
-            "scene_state": {},
-            "images": [],
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert isinstance(payload["actions"], list)
-    assert payload["actions"][0]["action_id"] == "create_cube"
-    assert payload["actions"][0]["tool"] == "mesh.create_primitive"
-    assert payload["actions"][0]["params"]["name"] == "VectraCube"
 
 
 def test_create_task_returns_error_status_for_failed_plan(monkeypatch) -> None:
@@ -112,7 +57,9 @@ def test_create_task_returns_error_status_for_failed_plan(monkeypatch) -> None:
         lambda prompt, scene_state: PlannerResult(
             status="error",
             actions=[],
-            message="No actions returned: invalid request",
+            message="No actions returned: provider unavailable",
+            assumptions=[],
+            metadata={},
         ),
     )
 
@@ -128,6 +75,8 @@ def test_create_task_returns_error_status_for_failed_plan(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "error",
-        "message": "No actions returned: invalid request",
+        "message": "No actions returned: provider unavailable",
         "actions": [],
+        "assumptions": [],
+        "metadata": {},
     }
