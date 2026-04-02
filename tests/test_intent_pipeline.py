@@ -82,3 +82,40 @@ def test_director_loop_records_assumptions_instead_of_failing_on_missing_target(
     assert turn.status == "ok"
     assert turn.metadata["actions"][0]["params"]["target"] == "Cube_1"
     assert turn.assumptions
+
+
+def test_director_loop_supports_batched_tool_calls(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_controller",
+        lambda prompt, scene_state: __import__("agent_runtime.director.models", fromlist=["ControllerDecision"]).ControllerDecision(),
+    )
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_director",
+        lambda prompt_text, tools: ProviderResult(
+            provider="openai-director",
+            model="gpt-5.1",
+            assistant_text="I will create the base scene and add lighting in the same turn.",
+            tool_calls=[
+                ToolCall(name="mesh.create_primitive", arguments={"type": "plane", "name": "Floor"}),
+                ToolCall(name="light.create", arguments={"type": "AREA"}),
+            ],
+        ),
+    )
+
+    turn = DirectorLoop().step(
+        _context(
+            {
+                "active_object": None,
+                "selected_objects": [],
+                "objects": [],
+                "lights": [],
+                "groups": [],
+                "scene_centroid": [0.0, 0.0, 0.0],
+                "scene_bounds": {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]},
+            }
+        )
+    )
+
+    assert turn.status == "ok"
+    assert turn.metadata["batch_size"] == 2
+    assert len(turn.metadata["actions"]) == 2

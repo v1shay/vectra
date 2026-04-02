@@ -61,6 +61,7 @@ class AgentService:
                 expected_outcome=instruction.expected_outcome,
                 metadata=instruction.metadata,
             ),
+            metadata=instruction.metadata,
         )
         self.memory_manager.store_turn(
             {

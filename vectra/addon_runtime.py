@@ -65,6 +65,11 @@ if bpy is not None:
             default=0,
             min=0,
         ),
+        "vectra_history_json": lambda: bpy.props.StringProperty(
+            name="Agent History JSON",
+            description="Serialized execution history for audits and debugging",
+            default="[]",
+        ),
     }
 
     def _is_already_registered_error(exc: Exception) -> bool:

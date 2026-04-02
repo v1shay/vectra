@@ -8,7 +8,7 @@ import httpx
 
 from vectra.utils.logging import get_vectra_logger, log_structured
 
-from .config import EndpointConfig, RuntimeConfig, load_runtime_config
+from .config import EndpointConfig, load_runtime_config
 from .models import ControllerDecision, ProviderResult, ToolCall
 from .prompts import controller_system_prompt, director_system_prompt
 
@@ -92,6 +92,12 @@ def _request_with_logging(
         raise ProviderTimeoutError(str(exc) or "provider request timed out") from exc
     except (httpx.HTTPError, ValueError) as exc:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
+        error_payload = ""
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+            try:
+                error_payload = exc.response.text[:500]
+            except Exception:  # pragma: no cover - defensive logging only
+                error_payload = ""
         log_structured(
             _LOGGER,
             "provider_failure",
@@ -101,6 +107,7 @@ def _request_with_logging(
                 "attempt": attempt,
                 "elapsed_ms": elapsed_ms,
                 "error": str(exc),
+                "error_payload": error_payload,
             },
             level="error",
         )
@@ -148,6 +155,14 @@ def _parse_responses_output(data: dict[str, Any]) -> ProviderResult:
             else:
                 parsed_args = {}
             tool_calls.append(ToolCall(name=name, arguments=parsed_args))
+        elif item_type == "reasoning":
+            summary = item.get("summary")
+            if isinstance(summary, list):
+                for content in summary:
+                    if isinstance(content, dict):
+                        text = content.get("text")
+                        if isinstance(text, str) and text.strip():
+                            assistant_parts.append(text.strip())
     output_text = data.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
         assistant_parts.append(output_text.strip())
@@ -164,7 +179,7 @@ def _call_responses_api(
     config: EndpointConfig,
     *,
     instructions: str,
-    user_input: list[dict[str, Any]],
+    user_input: str | list[dict[str, Any]],
     tools: list[dict[str, Any]],
     timeout: float,
     max_retries: int,
@@ -172,15 +187,19 @@ def _call_responses_api(
     last_error: Exception | None = None
     for attempt in range(1, max_retries + 2):
         try:
+            payload = {
+                "model": config.model,
+                "input": user_input,
+                "instructions": instructions,
+                "tools": tools,
+            }
+            if tools:
+                payload["tool_choice"] = "auto"
+                payload["parallel_tool_calls"] = True
             data = _request_with_logging(
                 config,
                 path="/responses",
-                payload={
-                    "model": config.model,
-                    "input": user_input,
-                    "instructions": instructions,
-                    "tools": tools,
-                },
+                payload=payload,
                 timeout=timeout,
                 attempt=attempt,
             )
@@ -257,10 +276,19 @@ def _call_ollama_generate(
     response_text = str(payload.get("response", "")).strip()
     parsed = _extract_json_object(response_text)
     tool_call = parsed.get("tool_call")
+    tool_calls_value = parsed.get("tool_calls")
     complete = parsed.get("complete")
     clarify = parsed.get("clarify")
     tool_calls: list[ToolCall] = []
-    if isinstance(tool_call, dict) and isinstance(tool_call.get("name"), str):
+    if isinstance(tool_calls_value, list):
+        for item in tool_calls_value:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                continue
+            arguments = item.get("arguments", {})
+            if not isinstance(arguments, dict):
+                arguments = {}
+            tool_calls.append(ToolCall(name=item["name"], arguments=arguments))
+    elif isinstance(tool_call, dict) and isinstance(tool_call.get("name"), str):
         arguments = tool_call.get("arguments", {})
         if not isinstance(arguments, dict):
             arguments = {}
@@ -275,27 +303,18 @@ def _call_ollama_generate(
         assistant_text=str(parsed.get("assistant_text", "")).strip(),
         tool_calls=tool_calls,
         raw_response={"response": response_text},
+        provider_chain=[f"ollama:{model}"],
     )
 
 
-def build_controller_input(prompt: str, scene_state: dict[str, Any]) -> list[dict[str, Any]]:
+def build_controller_input(prompt: str, scene_state: dict[str, Any]) -> str:
     object_count = len(scene_state.get("objects", [])) if isinstance(scene_state.get("objects"), list) else 0
-    return [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": (
-                        f"Prompt: {prompt.strip()}\n"
-                        f"Scene object count: {object_count}\n"
-                        f"Active object: {scene_state.get('active_object')}\n"
-                        f"Selected objects: {scene_state.get('selected_objects', [])}"
-                    ),
-                }
-            ],
-        }
-    ]
+    return (
+        f"Prompt: {prompt.strip()}\n"
+        f"Scene object count: {object_count}\n"
+        f"Active object: {scene_state.get('active_object')}\n"
+        f"Selected objects: {scene_state.get('selected_objects', [])}"
+    )
 
 
 def call_controller(prompt: str, scene_state: dict[str, Any]) -> ControllerDecision:
@@ -317,14 +336,10 @@ def call_controller(prompt: str, scene_state: dict[str, Any]) -> ControllerDecis
         return ControllerDecision()
 
     parsed = _extract_json_object(result.assistant_text)
-    task_type = parsed.get("task_type")
-    if task_type not in {"scene_creation", "scene_modification", "scene_refinement", "unknown"}:
-        task_type = "unknown"
     complexity = parsed.get("complexity")
     if complexity not in {"low", "medium", "high"}:
         complexity = "medium"
     return ControllerDecision(
-        task_type=task_type,
         needs_scene_context=bool(parsed.get("needs_scene_context", True)),
         needs_visual_feedback=bool(parsed.get("needs_visual_feedback", False)),
         complexity=complexity,
@@ -334,13 +349,8 @@ def call_controller(prompt: str, scene_state: dict[str, Any]) -> ControllerDecis
     )
 
 
-def build_director_input(prompt_text: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "role": "user",
-            "content": [{"type": "input_text", "text": prompt_text}],
-        }
-    ]
+def build_director_input(prompt_text: str) -> str:
+    return prompt_text
 
 
 def call_director(
@@ -366,7 +376,7 @@ def call_director(
 
     for config in cloud_chain:
         try:
-            return _call_responses_api(
+            result = _call_responses_api(
                 config,
                 instructions=director_system_prompt(),
                 user_input=build_director_input(prompt_text),
@@ -374,13 +384,22 @@ def call_director(
                 timeout=runtime.director_timeout_seconds,
                 max_retries=runtime.director_max_retries,
             )
+            return ProviderResult(
+                provider=result.provider,
+                model=result.model,
+                assistant_text=result.assistant_text,
+                tool_calls=result.tool_calls,
+                raw_response=result.raw_response,
+                provider_chain=[f"{config.provider}:{config.model}"],
+            )
         except ProviderError as exc:
             last_error = exc
 
     ollama_prompt = (
         f"{director_system_prompt()}\n\n"
-        "Return a JSON object with optional keys assistant_text, tool_call, complete, or clarify.\n"
-        "tool_call must look like {\"name\": string, \"arguments\": object}.\n"
+        "Return a JSON object with optional keys assistant_text, tool_calls, tool_call, complete, or clarify.\n"
+        "tool_calls must be an array of up to 4 items that each look like {\"name\": string, \"arguments\": object}.\n"
+        "If you return a single tool call, you may use tool_call instead.\n"
         f"User context:\n{prompt_text}"
     )
     for attempt, model in enumerate(

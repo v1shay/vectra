@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+import os
 from typing import Any
 
+from .normalization import normalize_action_params
 from ..tools.base import ToolExecutionError, ToolValidationError
 from ..tools.registry import ToolRegistry, ToolRegistryError, get_default_registry
 from ..utils.logging import (
@@ -37,6 +39,7 @@ class ActionExecutionResult:
     success: bool
     outputs: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    repairs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -45,6 +48,7 @@ class ExecutionReport:
     results: list[ActionExecutionResult]
     failed_action_id: str | None = None
     message: str = ""
+    repairs: list[str] = field(default_factory=list)
 
 
 class ExecutionEngine:
@@ -55,6 +59,7 @@ class ExecutionEngine:
         else:
             self.registry = registry
         self.logger = logger or get_vectra_logger("vectra.execution")
+        self._transient_failures_seen: set[str] = set()
 
     def run(self, context: Any, actions: Sequence[dict[str, Any]]) -> ExecutionReport:
         if not isinstance(actions, Sequence) or isinstance(actions, (str, bytes, bytearray)):
@@ -63,6 +68,7 @@ class ExecutionEngine:
         results: list[ActionExecutionResult] = []
         outputs_by_action: dict[str, dict[str, Any]] = {}
         seen_action_ids: set[str] = set()
+        report_repairs: list[str] = []
 
         for index, raw_action in enumerate(actions):
             action_id = self._extract_action_id(raw_action)
@@ -72,7 +78,11 @@ class ExecutionEngine:
                 normalized_action = self._normalize_action(raw_action, index, seen_action_ids)
                 resolved_params = self._resolve_refs(normalized_action.params, outputs_by_action)
                 tool = self.registry.get(normalized_action.tool)
-                validated_params = tool.validate_params(resolved_params)
+                normalized_params = normalize_action_params(tool, resolved_params)
+                repaired_messages = [repair.reason for repair in normalized_params.repairs]
+                report_repairs.extend(repaired_messages)
+                validated_params = tool.validate_params(normalized_params.params)
+                self._maybe_inject_transient_failure(normalized_action.tool)
 
                 log_action_start(
                     self.logger,
@@ -88,6 +98,7 @@ class ExecutionEngine:
                         tool=normalized_action.tool,
                         success=True,
                         outputs=outputs,
+                        repairs=repaired_messages,
                     )
                 )
                 if normalized_action.action_id is not None:
@@ -107,6 +118,7 @@ class ExecutionEngine:
                         tool=tool_name,
                         success=False,
                         error=message,
+                        repairs=report_repairs,
                     )
                 )
                 report = ExecutionReport(
@@ -114,6 +126,7 @@ class ExecutionEngine:
                     results=results,
                     failed_action_id=action_id,
                     message=f"Action failed: {tool_name} - {message}",
+                    repairs=report_repairs,
                 )
                 log_execution_report(self.logger, report)
                 return report
@@ -126,6 +139,7 @@ class ExecutionEngine:
                         tool=tool_name,
                         success=False,
                         error=message,
+                        repairs=report_repairs,
                     )
                 )
                 report = ExecutionReport(
@@ -133,6 +147,7 @@ class ExecutionEngine:
                     results=results,
                     failed_action_id=action_id,
                     message=f"Action failed: {tool_name} - {message}",
+                    repairs=report_repairs,
                 )
                 log_execution_report(self.logger, report)
                 return report
@@ -142,9 +157,18 @@ class ExecutionEngine:
             if not results
             else f"Executed {len(results)} action(s) successfully"
         )
-        report = ExecutionReport(success=True, results=results, message=success_message)
+        report = ExecutionReport(success=True, results=results, message=success_message, repairs=report_repairs)
         log_execution_report(self.logger, report)
         return report
+
+    def _maybe_inject_transient_failure(self, tool_name: str) -> None:
+        configured = os.getenv("VECTRA_AUDIT_INJECT_TRANSIENT_FAILURE", "").strip()
+        if not configured or configured != tool_name:
+            return
+        if tool_name in self._transient_failures_seen:
+            return
+        self._transient_failures_seen.add(tool_name)
+        raise ToolExecutionError(f"Injected transient failure for audit on '{tool_name}'")
 
     @staticmethod
     def _extract_action_id(raw_action: Any) -> str | None:

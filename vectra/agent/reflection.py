@@ -19,6 +19,7 @@ def summarize_scene_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[
     removed = sorted(name for name in before_objects if name not in after_objects)
 
     moved: list[dict[str, Any]] = []
+    changed: list[str] = []
     for name in sorted(set(before_objects).intersection(after_objects)):
         before_location = before_objects[name].get("location")
         after_location = after_objects[name].get("location")
@@ -36,19 +37,34 @@ def summarize_scene_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[
                     "after": [float(value) for value in after_location],
                 }
             )
+            continue
+
+        for field_name in ("rotation_euler", "scale", "material_names", "parent", "collection_names", "keyframe_count", "light_energy", "camera_lens"):
+            if before_objects[name].get(field_name) != after_objects[name].get(field_name):
+                changed.append(name)
+                break
+
+    frame_changed = before.get("current_frame") != after.get("current_frame")
 
     summary_parts: list[str] = []
     if created:
         summary_parts.append(f"Created {', '.join(created)}")
     if moved:
         summary_parts.append(f"Moved {', '.join(item['name'] for item in moved)}")
+    if changed:
+        summary_parts.append(f"Adjusted {', '.join(changed)}")
     if removed:
         summary_parts.append(f"Removed {', '.join(removed)}")
+    if frame_changed:
+        summary_parts.append(f"Changed frame from {before.get('current_frame')} to {after.get('current_frame')}")
 
     summary = "; ".join(summary_parts) if summary_parts else "No scene changes were detected."
     return {
         "created_objects": created,
         "removed_objects": removed,
         "moved_objects": moved,
+        "changed_objects": changed,
+        "frame_changed": frame_changed,
+        "meaningful_change": bool(created or removed or moved or changed or frame_changed),
         "summary": summary,
     }

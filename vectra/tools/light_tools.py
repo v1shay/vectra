@@ -64,3 +64,37 @@ class CreateLightTool(BaseTool):
             outputs={"object_name": light_object.name, "object_names": [light_object.name]},
             message=f"Created light '{light_object.name}'",
         )
+
+
+@register_tool
+class AdjustLightTool(BaseTool):
+    name = "light.adjust"
+    description = "Adjust an existing light's location, rotation, or energy."
+    input_schema = {
+        "target": {"type": "string", "required": False},
+        "location": {"type": "vector3", "required": False},
+        "rotation": {"type": "vector3", "required": False},
+        "energy": {"type": "number", "required": False},
+    }
+
+    def execute(self, context: Any, params: dict[str, Any]) -> ToolExecutionResult:
+        if bpy is None:
+            raise ToolExecutionError("Blender Python API is unavailable")
+        ensure_object_mode(context)
+        light_object = resolve_object(context, params.get("target"))
+        if light_object is None or getattr(light_object, "type", "") != "LIGHT":
+            raise ToolExecutionError("No light could be resolved for adjustment")
+
+        if params.get("location") is not None:
+            light_object.location = validate_vector3(params["location"], "location")
+        if params.get("rotation") is not None:
+            light_object.rotation_euler = validate_vector3(params["rotation"], "rotation")
+        if params.get("energy") is not None:
+            if isinstance(params["energy"], bool):
+                raise ToolValidationError("'energy' must be numeric")
+            light_object.data.energy = float(params["energy"])
+
+        return ToolExecutionResult(
+            outputs={"object_name": light_object.name, "object_names": [light_object.name]},
+            message=f"Adjusted light '{light_object.name}'",
+        )

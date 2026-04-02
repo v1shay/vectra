@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,6 +42,9 @@ class AgentLoopState:
     history: list[dict[str, Any]] = field(default_factory=list)
     iteration: int = 0
     failure_signatures: dict[str, int] = field(default_factory=dict)
+    ineffective_turns: int = 0
+    last_action_families: list[str] = field(default_factory=list)
+    budget_state: dict[str, Any] = field(default_factory=dict)
 
 
 _agent_loop_state: AgentLoopState | None = None
@@ -81,6 +85,11 @@ def _append_transcript(scene: bpy.types.Scene, message: str | None) -> None:
         return
     existing = getattr(scene, "vectra_agent_transcript", "")
     scene.vectra_agent_transcript = f"{existing}\n{normalized}".strip() if existing else normalized
+
+
+def _sync_history(scene: bpy.types.Scene, state: AgentLoopState | None) -> None:
+    history = state.history if state is not None else []
+    scene.vectra_history_json = json.dumps(history)
 
 
 def _apply_ui_state(scene: bpy.types.Scene, *, status: str, phase: str) -> None:
@@ -171,6 +180,16 @@ def _execution_signature(execution_payload: dict[str, Any]) -> str:
     if execution_payload.get("kind") == "console_code":
         return str(execution_payload.get("code", "")).strip()
     return str(execution_payload.get("actions", []))
+
+
+def _action_families(execution_payload: dict[str, Any]) -> list[str]:
+    metadata = execution_payload.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return []
+    families = metadata.get("action_families", [])
+    if not isinstance(families, list):
+        return []
+    return [value for value in families if isinstance(value, str) and value.strip()]
 
 
 def _start_worker(
@@ -288,6 +307,7 @@ def _handle_agent_execution(scene: bpy.types.Scene, response: dict[str, Any]) ->
             "kind": kind,
             "results": [result.__dict__ for result in report.results],
             "actions": actions,
+            "repairs": list(report.repairs),
             "metadata": {
                 "affected_object_names": affected_object_names,
                 **(execution_payload.get("metadata", {}) if isinstance(execution_payload.get("metadata"), dict) else {}),
@@ -327,6 +347,7 @@ def _maybe_continue_agent_loop(
         return None
 
     signature = _execution_signature(execution_payload)
+    action_families = _action_families(execution_payload)
     if not success:
         state.failure_signatures[signature] = state.failure_signatures.get(signature, 0) + 1
         if state.failure_signatures[signature] >= 2:
@@ -340,6 +361,7 @@ def _maybe_continue_agent_loop(
             return None
     else:
         state.failure_signatures.pop(signature, None)
+    effective_change = bool(verification.get("meaningful_change"))
 
     if not success:
         if state.iteration >= MAX_AGENT_ITERATIONS:
@@ -348,8 +370,27 @@ def _maybe_continue_agent_loop(
             _finalize_request()
             return None
         _append_transcript(scene, "Adjusting after the last step did not land correctly.")
+        state.ineffective_turns = min(state.ineffective_turns + 1, 999)
+        state.last_action_families = action_families
         _start_agent_iteration(bpy.context)
         return 0.1
+
+    if not effective_change:
+        state.ineffective_turns += 1
+        repeated_family = bool(action_families) and action_families == state.last_action_families
+        if repeated_family:
+            _append_transcript(scene, "The last ineffective step reused the same action family, so the next turn must switch strategies.")
+        else:
+            _append_transcript(scene, "The last step did not produce a meaningful scene change, so the next turn must change tactics.")
+        if state.ineffective_turns >= 3:
+            _apply_ui_state(scene, status="Stopping after repeated ineffective turns", phase="error")
+            scene.vectra_request_in_flight = False
+            _finalize_request()
+            return None
+    else:
+        state.ineffective_turns = 0
+
+    state.last_action_families = action_families
 
     if response.get("status") == "complete" or not bool(response.get("continue_loop")):
         final_status = verification.get("summary", "") or str(response.get("message", "Task complete")).strip()
@@ -375,6 +416,9 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
 
     narration = str(response.get("narration", "")).strip()
     assumptions = response.get("assumptions", [])
+    response_metadata = response.get("metadata", {})
+    if isinstance(response_metadata, dict):
+        state.budget_state = dict(response_metadata.get("budget_state", {})) if isinstance(response_metadata.get("budget_state"), dict) else {}
     if narration:
         scene.vectra_status = narration
         _append_transcript(scene, narration)
@@ -386,6 +430,8 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
         ]
         for line in assumption_lines[:3]:
             _append_transcript(scene, line)
+    if isinstance(response_metadata, dict) and response_metadata.get("completion_mode_active"):
+        _append_transcript(scene, "Completion mode is active, so the next steps should prioritize a coherent finish.")
 
     state.history.append(
         _history_entry(
@@ -398,9 +444,11 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
                 "intended_actions": response.get("intended_actions", []),
                 "assumptions": assumptions if isinstance(assumptions, list) else [],
                 "preferred_execution_mode": response.get("preferred_execution_mode", DEFAULT_EXECUTION_MODE),
+                "metadata": response_metadata if isinstance(response_metadata, dict) else {},
             },
         )
     )
+    _sync_history(scene, state)
 
     response_status = str(response.get("status", "error")).strip().lower()
     if response_status == "clarify":
@@ -446,6 +494,7 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
             verification,
         )
     )
+    _sync_history(scene, state)
     _append_transcript(scene, execution_message)
     _append_transcript(scene, verification["summary"])
 
@@ -510,6 +559,8 @@ def cleanup_request_state() -> None:
             scene.vectra_pending_question = ""
         if hasattr(scene, "vectra_iteration"):
             scene.vectra_iteration = 0
+        if hasattr(scene, "vectra_history_json"):
+            scene.vectra_history_json = "[]"
 
     _request_queue = None
     _execution_engine = None
@@ -553,6 +604,7 @@ class VECTRA_OT_run_task(bpy.types.Operator):
             scene.vectra_agent_transcript = ""
             scene.vectra_pending_question = ""
             scene.vectra_iteration = 0
+            scene.vectra_history_json = "[]"
             if _is_poll_timer_registered():
                 bpy.app.timers.unregister(_poll_request_result)
             bpy.app.timers.register(_poll_request_result, first_interval=0.1)

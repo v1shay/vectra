@@ -86,3 +86,4 @@ class AgentStepResponse(BaseModel):
     error: str | None = None
     expected_outcome: str = ""
     execution: ExecutionPayloadModel = Field(default_factory=ExecutionPayloadModel)
+    metadata: dict[str, Any] = Field(default_factory=dict)
