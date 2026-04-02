@@ -35,7 +35,7 @@ def test_resolve_dev_source_path_rejects_invalid_repo_root(tmp_path: Path) -> No
     resolved, error = addon_loader.resolve_dev_source_path(str(tmp_path / "missing"))
 
     assert resolved is None
-    assert error == f"Invalid Vectra dev source path: {(tmp_path / 'missing').resolve()}"
+    assert error == f"Invalid Vectra development source path: {(tmp_path / 'missing').resolve()}"
 
 
 def test_resolve_dev_source_path_ignores_non_string_values() -> None:
@@ -154,4 +154,4 @@ def test_activate_runtime_falls_back_to_packaged_on_invalid_dev_path(
     status = addon_loader.get_runtime_status()
     assert status.mode == "packaged"
     assert status.source_path is None
-    assert status.error == f"Invalid Vectra dev source path: {(tmp_path / 'missing').resolve()}"
+    assert status.error == f"Invalid Vectra development source path: {(tmp_path / 'missing').resolve()}"

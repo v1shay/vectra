@@ -11,23 +11,36 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 try:
-    from .models import ActionModel, HealthResponse, TaskCreateRequest, TaskCreateResponse
+    from .agent.service import AgentService
+    from .models import (
+        ActionModel,
+        AgentStepRequest,
+        AgentStepResponse,
+        HealthResponse,
+        TaskCreateRequest,
+        TaskCreateResponse,
+    )
     from .planner import plan
+    from .utils import model_to_dict
     from vectra.utils.logging import get_vectra_logger, log_structured
 except ImportError:  # pragma: no cover - supports `uvicorn main:app` from agent_runtime/
-    from models import ActionModel, HealthResponse, TaskCreateRequest, TaskCreateResponse
+    from agent.service import AgentService
+    from models import (
+        ActionModel,
+        AgentStepRequest,
+        AgentStepResponse,
+        HealthResponse,
+        TaskCreateRequest,
+        TaskCreateResponse,
+    )
     from planner import plan
+    from utils import model_to_dict
     from vectra.utils.logging import get_vectra_logger, log_structured
 
 logger = get_vectra_logger("vectra.runtime")
 
 app = FastAPI(title="Vectra Runtime", version="0.1.0")
-
-
-def _model_to_dict(model: object) -> dict:
-    if hasattr(model, "model_dump"):
-        return model.model_dump()  # type: ignore[no-any-return]
-    return model.dict()  # type: ignore[attr-defined,no-any-return]
+agent_service = AgentService()
 
 
 def _build_action_models(actions: list[dict[str, Any]]) -> list[ActionModel]:
@@ -41,7 +54,7 @@ def health() -> HealthResponse:
 
 @app.post("/task/create", response_model=TaskCreateResponse)
 def create_task(request: TaskCreateRequest) -> TaskCreateResponse:
-    request_dict = _model_to_dict(request)
+    request_dict = model_to_dict(request)
     log_structured(logger, "task_request", request_dict)
     planner_result = plan(
         request.prompt,
@@ -51,6 +64,17 @@ def create_task(request: TaskCreateRequest) -> TaskCreateResponse:
         status=planner_result.status,
         message=planner_result.message,
         actions=_build_action_models(planner_result.actions),
+        assumptions=planner_result.assumptions,
+        metadata=planner_result.metadata,
     )
-    log_structured(logger, "task_response", _model_to_dict(response))
+    log_structured(logger, "task_response", model_to_dict(response))
+    return response
+
+
+@app.post("/agent/step", response_model=AgentStepResponse)
+def agent_step(request: AgentStepRequest) -> AgentStepResponse:
+    request_dict = model_to_dict(request)
+    log_structured(logger, "agent_step_request", request_dict)
+    response = agent_service.step(request)
+    log_structured(logger, "agent_step_response", model_to_dict(response))
     return response

@@ -24,6 +24,10 @@ class types:
         vectra_status: str
         vectra_phase: str
         vectra_request_in_flight: bool
+        vectra_execution_mode: str
+        vectra_agent_transcript: str
+        vectra_pending_question: str
+        vectra_iteration: int
 
     class Context:
         scene: "types.Scene"
@@ -61,6 +65,8 @@ context: types.Context
 class _Props:
     def StringProperty(self, **kwargs: Any) -> Any: ...
     def BoolProperty(self, **kwargs: Any) -> Any: ...
+    def EnumProperty(self, **kwargs: Any) -> Any: ...
+    def IntProperty(self, **kwargs: Any) -> Any: ...
 
 
 props: _Props

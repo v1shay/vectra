@@ -4,14 +4,25 @@ import os
 import shlex
 import subprocess
 import time
+import json
 from pathlib import Path
 from typing import TextIO
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 from .bridge.client import BridgeClientError, BridgeConnectionError, health_check
 
 DEFAULT_BACKEND_STARTUP_TIMEOUT_SECONDS = 15.0
 HEALTH_POLL_INTERVAL_SECONDS = 0.1
+DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+PREFERRED_OLLAMA_MODEL_HINTS = (
+    "qwen2.5-coder",
+    "deepseek-coder-v2",
+    "qwen",
+    "deepseek",
+    "coder",
+)
 
 _MANAGED_BACKEND_PROCESS: subprocess.Popen[str] | None = None
 _MANAGED_BACKEND_LOG_HANDLE: TextIO | None = None
@@ -104,16 +115,15 @@ def _manual_start_command(repo_root_hint: str | None, base_url: str) -> str:
     if repo_root_hint:
         repo_root = Path(repo_root_hint).expanduser()
         python_bin = _repo_python_bin(repo_root) or repo_root / ".venv" / "bin" / "python"
-        agent_runtime_dir = repo_root / "agent_runtime"
         return (
-            f"cd {shlex.quote(str(agent_runtime_dir))} && "
-            f"{shlex.quote(str(python_bin))} -m uvicorn main:app --reload "
+            f"cd {shlex.quote(str(repo_root))} && "
+            f"{shlex.quote(str(python_bin))} -m uvicorn agent_runtime.main:app --reload "
             f"--host {host} --port {port}"
         )
 
     return (
-        "cd <repo>/agent_runtime && "
-        "<repo>/.venv/bin/python -m uvicorn main:app --reload "
+        "cd <repo> && "
+        "<repo>/.venv/bin/python -m uvicorn agent_runtime.main:app --reload "
         f"--host {host} --port {port}"
     )
 
@@ -122,6 +132,74 @@ def _backend_log_path(repo_root: Path) -> Path:
     log_dir = repo_root / ".vectra"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / "backend.log"
+
+
+def _normalize_http_url(raw_url: str) -> str:
+    normalized = raw_url.strip()
+    if not normalized:
+        return ""
+    if not normalized.startswith(("http://", "https://")):
+        normalized = f"http://{normalized}"
+    return normalized.rstrip("/")
+
+
+def _ollama_root_url(env: dict[str, str]) -> str:
+    raw_url = env.get("OLLAMA_HOST", "").strip() or DEFAULT_OLLAMA_HOST
+    normalized = _normalize_http_url(raw_url)
+    if normalized.endswith("/v1"):
+        return normalized[:-3]
+    return normalized
+
+
+def _select_ollama_model(model_names: list[str]) -> str | None:
+    if not model_names:
+        return None
+
+    lowered = [(model_name, model_name.lower()) for model_name in model_names]
+    for hint in PREFERRED_OLLAMA_MODEL_HINTS:
+        for model_name, lowered_name in lowered:
+            if hint in lowered_name:
+                return model_name
+    return model_names[0]
+
+
+def _discover_ollama_model(env: dict[str, str]) -> str | None:
+    root_url = _ollama_root_url(env)
+    request = Request(f"{root_url}/api/tags", headers={"Accept": "application/json"})
+    try:
+        with urlopen(request, timeout=2.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, URLError, HTTPError):
+        return None
+
+    raw_models = payload.get("models", [])
+    if not isinstance(raw_models, list):
+        return None
+
+    model_names = [
+        model.get("name")
+        for model in raw_models
+        if isinstance(model, dict) and isinstance(model.get("name"), str)
+    ]
+    return _select_ollama_model(model_names)
+
+
+def _seed_llm_env_from_ollama(env: dict[str, str]) -> dict[str, str]:
+    if env.get("VECTRA_LLM_BASE_URL", "").strip() and env.get("VECTRA_LLM_API_KEY", "").strip() and env.get("VECTRA_LLM_MODEL", "").strip():
+        return env
+
+    model = env.get("VECTRA_OLLAMA_MODEL", "").strip() or _discover_ollama_model(env)
+    if not model:
+        return env
+
+    seeded = dict(env)
+    seeded.setdefault("VECTRA_LLM_BASE_URL", f"{_ollama_root_url(env)}/v1")
+    seeded.setdefault("VECTRA_LLM_API_KEY", env.get("OLLAMA_API_KEY", "").strip() or "ollama")
+    seeded.setdefault("VECTRA_LLM_MODEL", model)
+    seeded.setdefault("VECTRA_LLM_TIMEOUT_SECONDS", "45")
+    seeded.setdefault("VECTRA_LLM_MAX_RETRIES", "2")
+    seeded.setdefault("VECTRA_LLM_SCENE_OBJECT_LIMIT", "30")
+    return seeded
 
 
 def _start_backend_process(repo_root: Path, base_url: str) -> None:
@@ -154,7 +232,7 @@ def _start_backend_process(repo_root: Path, base_url: str) -> None:
         str(python_bin),
         "-m",
         "uvicorn",
-        "main:app",
+        "agent_runtime.main:app",
         "--reload",
         "--host",
         host,
@@ -163,11 +241,12 @@ def _start_backend_process(repo_root: Path, base_url: str) -> None:
     ]
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    env = _seed_llm_env_from_ollama(env)
 
     try:
         process = subprocess.Popen(
             command,
-            cwd=repo_root / "agent_runtime",
+            cwd=repo_root,
             env=env,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
@@ -232,7 +311,7 @@ def ensure_local_backend(
     if repo_root is None:
         raise BridgeConnectionError(
             f"{initial_error}. Vectra could not auto-start the backend because it could not find "
-            "a repo checkout with agent_runtime/. Set the Vectra Dev Source Path to the repo root "
+            "a repo checkout with agent_runtime/. Set the Vectra Development Source Path to the repo root "
             f"or start the backend manually with: {_manual_start_command(repo_root_hint, base_url)}"
         ) from initial_error
 

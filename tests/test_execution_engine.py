@@ -70,6 +70,26 @@ class RejectingTransformTool(FakeTransformTool):
         raise ToolValidationError("Invalid transform params")
 
 
+class FakeNullableTransformTool(BaseTool):
+    name = "object.transform"
+    description = "Transform tool that rejects nullable delta values if they survive normalization"
+    input_schema = {
+        "target": {"type": "string", "required": True},
+        "location": {"type": "vector3", "required": False},
+        "delta": {"type": "vector3", "required": False},
+    }
+
+    def validate_params(self, params: dict[str, object]) -> dict[str, object]:
+        params = super().validate_params(params)
+        if params.get("delta") is None and "delta" in params:
+            raise ToolValidationError("'delta' should have been dropped before validation")
+        return params
+
+    def execute(self, context: FakeContext, params: dict[str, object]) -> ToolExecutionResult:
+        context.transforms.append({"target": params["target"], "location": params.get("location")})
+        return ToolExecutionResult(outputs={"object_name": str(params["target"])}, message="normalized")
+
+
 EXECUTION_LOOP_ACTIONS = [
     {
         "action_id": "create_cube",
@@ -179,3 +199,22 @@ def test_backend_action_to_execution_loop_works() -> None:
     assert payload["message"] == "planned"
     assert report.success is True
     assert report.results[-1].outputs == {"object_name": "VectraCube"}
+
+
+def test_execution_engine_drops_absent_optional_fields_before_validation() -> None:
+    engine = _make_engine(FakeNullableTransformTool)
+    context = FakeContext()
+
+    report = engine.run(
+        context,
+        [
+            {
+                "action_id": "move",
+                "tool": "object.transform",
+                "params": {"target": "Cube", "location": [0.0, 0.0, 0.0], "delta": None},
+            }
+        ],
+    )
+
+    assert report.success is True
+    assert any("Dropped absent optional field 'delta'" in repair for repair in report.repairs)

@@ -40,6 +40,36 @@ if bpy is not None:
             description="Whether a Vectra runtime request is currently running",
             default=False,
         ),
+        "vectra_execution_mode": lambda: bpy.props.EnumProperty(
+            name="Execution Mode",
+            description="Execution backend used when VECTRA_AGENT_MODE is enabled",
+            items=(
+                ("vectra-dev", "vectra-dev", "Tool-based execution"),
+                ("vectra-code", "vectra-code", "Console-injected Python execution"),
+            ),
+            default="vectra-dev",
+        ),
+        "vectra_agent_transcript": lambda: bpy.props.StringProperty(
+            name="Agent Transcript",
+            description="Narrated progress from the autonomous agent loop",
+            default="",
+        ),
+        "vectra_pending_question": lambda: bpy.props.StringProperty(
+            name="Pending Question",
+            description="Clarification requested by the agent loop",
+            default="",
+        ),
+        "vectra_iteration": lambda: bpy.props.IntProperty(
+            name="Agent Iteration",
+            description="Current iteration of the agent loop",
+            default=0,
+            min=0,
+        ),
+        "vectra_history_json": lambda: bpy.props.StringProperty(
+            name="Agent History JSON",
+            description="Serialized execution history for audits and debugging",
+            default="[]",
+        ),
     }
 
     def _is_already_registered_error(exc: Exception) -> bool:

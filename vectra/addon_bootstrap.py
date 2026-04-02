@@ -136,7 +136,7 @@ if bpy is not None:
         bl_idname = ADDON_PACKAGE_NAME
 
         dev_source_path: bpy.props.StringProperty(
-            name="Dev Source Path",
+            name="Development Source Path",
             description="Path to the local Vectra repo root for live development reloads",
             subtype="DIR_PATH",
             default="",
@@ -152,12 +152,12 @@ if bpy is not None:
             layout.label(text=f"Resolved source: {status.source_path or 'Packaged add-on'}")
             if status.error:
                 layout.label(text=f"Last reload error: {status.error}")
-            layout.operator("vectra.reload_dev", text="Reload Vectra Dev")
+            layout.operator("vectra.reload_dev", text="Reload Development Source")
 
 
     class VECTRA_OT_reload_dev(bpy.types.Operator):
         bl_idname = "vectra.reload_dev"
-        bl_label = "Reload Vectra Dev"
+        bl_label = "Reload Development Source"
         bl_description = "Reload the Vectra runtime from the configured development source path"
 
         def execute(self, context: bpy.types.Context) -> set[str]:

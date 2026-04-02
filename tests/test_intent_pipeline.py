@@ -1,238 +1,121 @@
 from __future__ import annotations
 
-import pytest
-
-from agent_runtime.action_planner import ActionPlanningError, plan_actions
-from agent_runtime.intent import IntentEnvelope, IntentStep, normalize_intent
-
-
-def _single_cube_scene() -> dict[str, object]:
-    return {
-        "active_object": "Cube",
-        "selected_objects": ["Cube"],
-        "current_frame": 1,
-        "objects": [
-            {
-                "name": "Cube",
-                "type": "MESH",
-                "selected": True,
-                "active": True,
-                "location": [0.0, 0.0, 0.0],
-                "rotation_euler": [0.0, 0.0, 0.0],
-                "scale": [1.0, 1.0, 1.0],
-            }
-        ],
-    }
+from agent_runtime.director.loop import DirectorLoop
+from agent_runtime.director.models import DirectorContext, ProviderResult, ToolCall
+from agent_runtime.director.resolver import ReferenceResolver
 
 
-def test_normalize_intent_maps_a_couple_into_downward_transform() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target="that plane",
-                target_name="Plane",
-                direction="into the ground",
-                magnitude_qualifier="a couple",
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
-    )
-    scene_state = {
-        "active_object": "Plane",
-        "selected_objects": ["Plane"],
-        "current_frame": 1,
-        "objects": [
-            {
-                "name": "Plane",
-                "type": "MESH",
-                "selected": True,
-                "active": True,
-                "location": [5.0, -11.0, 0.0],
-                "rotation_euler": [0.0, 0.0, 0.0],
-                "scale": [1.0, 1.0, 1.0],
-            }
-        ],
-    }
-
-    normalized = normalize_intent(
-        intent,
-        prompt="move that plane a couple units into the ground",
+def _context(scene_state: dict[str, object]) -> DirectorContext:
+    return DirectorContext(
+        user_prompt="fix spacing",
         scene_state=scene_state,
-        minimum_confidence=0.35,
+        screenshot=None,
+        history=[],
+        iteration=1,
+        execution_mode="vectra-dev",
+        memory_results=[],
     )
 
-    assert normalized.status == "ok"
-    assert normalized.steps[0].direction == "down"
-    assert normalized.steps[0].magnitude == 2.0
-    assert normalized.steps[0].target_name == "Plane"
 
-
-def test_normalize_intent_resolves_pronoun_to_active_object() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target="it",
-                direction="back",
-                magnitude=2,
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
+def test_reference_resolver_uses_active_object_for_vague_pronouns() -> None:
+    resolver = ReferenceResolver(
+        _context(
+            {
+                "active_object": "Cube_1",
+                "selected_objects": ["Cube_1"],
+                "objects": [{"name": "Cube_1", "location": [0.0, 0.0, 0.0], "dimensions": [2.0, 2.0, 2.0]}],
+            }
+        )
     )
 
-    normalized = normalize_intent(
-        intent,
-        prompt="move it back",
-        scene_state=_single_cube_scene(),
-        minimum_confidence=0.35,
+    result = resolver.resolve_target("it")
+
+    assert result.value == "Cube_1"
+    assert result.assumptions[0].reason.startswith("Used the active object")
+
+
+def test_reference_resolver_uses_scene_centroid_or_origin_for_missing_location() -> None:
+    resolver = ReferenceResolver(
+        _context(
+            {
+                "active_object": None,
+                "selected_objects": [],
+                "objects": [
+                    {"name": "Cube_1", "location": [2.0, 0.0, 0.0], "dimensions": [2.0, 2.0, 2.0]},
+                    {"name": "Cube_2", "location": [4.0, 0.0, 0.0], "dimensions": [2.0, 2.0, 2.0]},
+                ],
+            }
+        )
     )
 
-    assert normalized.status == "ok"
-    assert normalized.steps[0].target_name == "Cube"
-    assert normalized.steps[0].direction == "backward"
+    result = resolver.resolve_location("mesh.create_primitive", None)
+
+    assert result.value == [3.0, 0.0, 0.0]
+    assert result.metadata["anchor"] == "scene_centroid"
 
 
-def test_normalize_intent_fails_closed_when_direction_is_missing() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target_name="Cube",
-                magnitude_qualifier="a bit",
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
+def test_director_loop_records_assumptions_instead_of_failing_on_missing_target(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_controller",
+        lambda prompt, scene_state: __import__("agent_runtime.director.models", fromlist=["ControllerDecision"]).ControllerDecision(),
+    )
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_director",
+        lambda prompt_text, tools: ProviderResult(
+            provider="openai-director",
+            model="gpt-5.1",
+            assistant_text="I'll spread the cubes apart.",
+            tool_calls=[ToolCall(name="object.transform", arguments={"delta": [3.0, 0.0, 0.0]})],
+        ),
     )
 
-    normalized = normalize_intent(
-        intent,
-        prompt="move cube a bit",
-        scene_state=_single_cube_scene(),
-        minimum_confidence=0.35,
+    turn = DirectorLoop().step(
+        _context(
+            {
+                "active_object": "Cube_1",
+                "selected_objects": ["Cube_1"],
+                "objects": [{"name": "Cube_1", "location": [0.0, 0.0, 0.0], "dimensions": [2.0, 2.0, 2.0]}],
+            }
+        )
     )
 
-    assert normalized.status == "no_action"
-    assert "direction" in normalized.reason.lower()
+    assert turn.status == "ok"
+    assert turn.metadata["actions"][0]["params"]["target"] == "Cube_1"
+    assert turn.assumptions
 
 
-def test_plan_actions_builds_absolute_transform_vector() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target_name="Cube",
-                direction="forward",
-                magnitude=2.0,
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
+def test_director_loop_supports_batched_tool_calls(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_controller",
+        lambda prompt, scene_state: __import__("agent_runtime.director.models", fromlist=["ControllerDecision"]).ControllerDecision(),
+    )
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_director",
+        lambda prompt_text, tools: ProviderResult(
+            provider="openai-director",
+            model="gpt-5.1",
+            assistant_text="I will create the base scene and add lighting in the same turn.",
+            tool_calls=[
+                ToolCall(name="mesh.create_primitive", arguments={"type": "plane", "name": "Floor"}),
+                ToolCall(name="light.create", arguments={"type": "AREA"}),
+            ],
+        ),
     )
 
-    actions = plan_actions(intent, scene_state=_single_cube_scene())
-
-    assert actions == [
-        {
-            "action_id": "step_1_transform_cube",
-            "tool": "object.transform",
-            "params": {"object_name": "Cube", "location": [0.0, 2.0, 0.0]},
-        }
-    ]
-
-
-def test_plan_actions_builds_rotation_with_default_z_axis() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target_name="Cube",
-                magnitude=45.0,
-                transform_kind="rotation",
-                axis="z",
-                confidence=0.8,
-            )
-        ],
+    turn = DirectorLoop().step(
+        _context(
+            {
+                "active_object": None,
+                "selected_objects": [],
+                "objects": [],
+                "lights": [],
+                "groups": [],
+                "scene_centroid": [0.0, 0.0, 0.0],
+                "scene_bounds": {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]},
+            }
+        )
     )
 
-    actions = plan_actions(intent, scene_state=_single_cube_scene())
-
-    assert actions[0]["tool"] == "object.transform"
-    assert actions[0]["params"]["rotation_euler"][2] == pytest.approx(0.78539816339)
-
-
-def test_plan_actions_supports_previous_step_refs_for_multi_step_requests() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(action="create", primitive_type="cube", confidence=0.8),
-            IntentStep(
-                action="transform",
-                target_ref="previous_step",
-                target="it",
-                direction="forward",
-                magnitude=2.0,
-                transform_kind="location",
-                confidence=0.8,
-            ),
-        ],
-    )
-
-    actions = plan_actions(intent, scene_state={"active_object": None, "selected_objects": [], "objects": []})
-
-    assert actions == [
-        {
-            "action_id": "step_1_create_cube",
-            "tool": "mesh.create_primitive",
-            "params": {"primitive_type": "cube", "location": [0.0, 0.0, 0.0]},
-        },
-        {
-            "action_id": "step_2_transform_previous",
-            "tool": "object.transform",
-            "params": {
-                "object_name": {"$ref": "step_1_create_cube.object_name"},
-                "location": [0.0, 2.0, 0.0],
-            },
-        },
-    ]
-
-
-def test_plan_actions_rejects_unresolved_previous_step_reference() -> None:
-    intent = IntentEnvelope(
-        status="ok",
-        confidence=0.8,
-        reason="",
-        steps=[
-            IntentStep(
-                action="transform",
-                target_ref="previous_step",
-                direction="forward",
-                magnitude=2.0,
-                transform_kind="location",
-                confidence=0.8,
-            )
-        ],
-    )
-
-    with pytest.raises(ActionPlanningError, match="previous object"):
-        plan_actions(intent, scene_state={"active_object": None, "selected_objects": [], "objects": []})
+    assert turn.status == "ok"
+    assert turn.metadata["batch_size"] == 2
+    assert len(turn.metadata["actions"]) == 2
