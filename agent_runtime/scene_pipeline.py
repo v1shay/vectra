@@ -3,9 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .construction import CompiledConstructionPlan, ConstructionError, compile_construction_plan
-from .llm_client import LLMClientError, extract_scene_intent
-from .scene_intent import SceneIntent, normalize_scene_intent
+try:
+    from .construction import CompiledConstructionPlan, ConstructionError, compile_construction_plan
+    from .llm_client import LLMClientError, extract_scene_intent
+    from .scene_intent import SceneIntent, normalize_scene_intent
+except ImportError:  # pragma: no cover - supports local module imports from agent_runtime/
+    from agent_runtime.construction import CompiledConstructionPlan, ConstructionError, compile_construction_plan
+    from agent_runtime.llm_client import LLMClientError, extract_scene_intent
+    from agent_runtime.scene_intent import SceneIntent, normalize_scene_intent
 
 _MINIMUM_SCENE_INTENT_CONFIDENCE = 0.35
 

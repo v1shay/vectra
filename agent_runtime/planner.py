@@ -10,8 +10,8 @@ try:
     from .llm_client import LLMClientError
     from .scene_pipeline import build_scene_pipeline
 except ImportError:  # pragma: no cover - supports local module imports from agent_runtime/
-    from llm_client import LLMClientError
-    from scene_pipeline import build_scene_pipeline
+    from agent_runtime.llm_client import LLMClientError
+    from agent_runtime.scene_pipeline import build_scene_pipeline
 
 
 class PlannerValidationError(Exception):

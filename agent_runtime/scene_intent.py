@@ -44,6 +44,10 @@ _SECTION_HEADERS = {
     "UNCERTAINTY",
     "METADATA",
 }
+_CODE_FENCE_PATTERN = re.compile(
+    r"^\s*```(?:json|JSON)?\s*(?P<body>.*?)\s*```\s*$",
+    re.DOTALL,
+)
 
 
 class SceneTransformIntent(BaseModel):
@@ -255,11 +259,19 @@ def _parse_sectioned_text(content: str) -> dict[str, Any]:
     return payload
 
 
+def _strip_wrapping_code_fences(content: str) -> str:
+    match = _CODE_FENCE_PATTERN.match(content)
+    if match is None:
+        return content
+    return match.group("body").strip()
+
+
 def parse_scene_intent_content(content: str) -> SceneIntent:
+    normalized_content = _strip_wrapping_code_fences(content)
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(normalized_content)
     except json.JSONDecodeError:
-        parsed = _parse_sectioned_text(content)
+        parsed = _parse_sectioned_text(normalized_content)
 
     if not isinstance(parsed, dict):
         raise SceneIntentParseError("Scene intent response must be a JSON object or labeled object")

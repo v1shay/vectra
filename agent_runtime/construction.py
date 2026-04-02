@@ -5,7 +5,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .scene_intent import ConstructionStep, SceneEntity, SceneGroup, SceneIntent, SceneRelationship
+try:
+    from .scene_intent import ConstructionStep, SceneEntity, SceneGroup, SceneIntent, SceneRelationship
+except ImportError:  # pragma: no cover - supports local module imports from agent_runtime/
+    from agent_runtime.scene_intent import ConstructionStep, SceneEntity, SceneGroup, SceneIntent, SceneRelationship
 
 _DEFAULT_DIMENSIONS = {
     "cube": [2.0, 2.0, 2.0],
