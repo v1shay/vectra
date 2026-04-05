@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "loki-mode": {
+      "source": "asklokesh/claudeskill-loki-mode",
+      "sourceType": "github",
+      "computedHash": "f316dd19b1e70d847500775ac6eeb7da67172428208ee40844f09699a9f2720d"
+    }
+  }
+}
