@@ -5,6 +5,7 @@ from typing import Any
 
 from vectra.tools.base import BaseTool
 from vectra.tools.registry import ToolRegistry, get_default_registry
+from vectra.utils.logging import get_vectra_logger, log_structured
 
 from .models import (
     AssumptionRecord,
@@ -20,6 +21,7 @@ from .resolver import ReferenceResolver
 
 _TURN_BUDGETS = {"low": 8, "medium": 12, "high": 16}
 _BATCH_LIMIT = 4
+_LOGGER = get_vectra_logger("vectra.runtime.director.loop")
 
 
 def _json_schema_for_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -252,7 +254,6 @@ def _build_director_prompt(
     context: DirectorContext,
     decision: ControllerDecision,
     budget_state: BudgetState,
-    tools: list[dict[str, Any]],
 ) -> str:
     screenshot = context.screenshot or {}
     controller_hint = decision.raw or {
@@ -269,9 +270,27 @@ def _build_director_prompt(
         f"Recent history:\n{_history_summary(context.history)}\n\n"
         f"Memory:\n{_memory_summary(context.memory_results)}\n\n"
         f"Screenshot:\n{json.dumps({'available': screenshot.get('available', False), 'path': screenshot.get('path'), 'reason': screenshot.get('reason')}, indent=2)}\n\n"
-        "Available tools:\n"
-        + json.dumps(tools, indent=2)
+        "Tool definitions are supplied separately when the provider supports structured tools."
     )
+
+
+def _serialized_provider_attempts(provider_attempts: list[Any]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for attempt in provider_attempts:
+        serialized.append(
+            {
+                "provider": getattr(attempt, "provider", ""),
+                "model": getattr(attempt, "model", ""),
+                "transport": getattr(attempt, "transport", ""),
+                "runtime_state": getattr(attempt, "runtime_state", ""),
+                "response_type": getattr(attempt, "response_type", ""),
+                "parsed_tool_call_count": getattr(attempt, "parsed_tool_call_count", 0),
+                "failure_reason": getattr(attempt, "failure_reason", ""),
+                "request_metadata": getattr(attempt, "request_metadata", {}),
+                "response_metadata": getattr(attempt, "response_metadata", {}),
+            }
+        )
+    return serialized
 
 
 class DirectorLoop:
@@ -522,11 +541,17 @@ class DirectorLoop:
         controller_decision = call_controller(context.user_prompt, context.scene_state)
         budget_state = context.budget_state or _derive_budget_state(context, controller_decision)
         tools = self._tool_schemas(context.execution_mode)
-        prompt_text = _build_director_prompt(context, controller_decision, budget_state, tools)
+        prompt_text = _build_director_prompt(context, controller_decision, budget_state)
 
         try:
-            provider_result = call_director(prompt_text=prompt_text, tools=tools)
+            provider_result = call_director(
+                prompt_text=prompt_text,
+                tools=tools,
+                allow_complete=context.iteration > 1,
+            )
         except ProviderError as exc:
+            runtime_state = getattr(exc, "runtime_state", "provider_transport_failure")
+            attempts = _serialized_provider_attempts(getattr(exc, "attempts", []))
             return DirectorTurn(
                 status="error",
                 message=str(exc),
@@ -537,7 +562,17 @@ class DirectorLoop:
                 expected_outcome="No execution could be prepared.",
                 continue_loop=False,
                 error=str(exc),
-                metadata={"bottleneck_tags": ["provider_transport"], "budget_state": budget_state.__dict__},
+                metadata={
+                    "bottleneck_tags": ["provider_transport"],
+                    "budget_state": budget_state.__dict__,
+                    "runtime_state": runtime_state,
+                    "runtime_state_detail": str(exc),
+                    "provider_attempts": attempts,
+                    "selected_provider": None,
+                    "response_type": "transport_failure",
+                    "parsed_tool_call_count": 0,
+                    "failure_reason": str(exc),
+                },
             )
 
         tool_calls = provider_result.tool_calls[:_BATCH_LIMIT]
@@ -557,8 +592,15 @@ class DirectorLoop:
                 metadata={
                     "provider_result": provider_result.raw_response,
                     "provider_chain": provider_result.provider_chain,
+                    "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
                     "budget_state": budget_state.__dict__,
                     "bottleneck_tags": [],
+                    "runtime_state": provider_result.runtime_state,
+                    "runtime_state_detail": summary,
+                    "selected_provider": provider_result.provider,
+                    "response_type": provider_result.response_type,
+                    "parsed_tool_call_count": len(provider_result.tool_calls),
+                    "failure_reason": "",
                 },
             )
 
@@ -580,8 +622,15 @@ class DirectorLoop:
                 metadata={
                     "provider_result": provider_result.raw_response,
                     "provider_chain": provider_result.provider_chain,
+                    "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
                     "budget_state": budget_state.__dict__,
                     "bottleneck_tags": ["tool_gap"] if reason else [],
+                    "runtime_state": provider_result.runtime_state,
+                    "runtime_state_detail": question,
+                    "selected_provider": provider_result.provider,
+                    "response_type": provider_result.response_type,
+                    "parsed_tool_call_count": len(provider_result.tool_calls),
+                    "failure_reason": reason,
                 },
             )
 
@@ -601,19 +650,74 @@ class DirectorLoop:
                 metadata={
                     "provider_result": provider_result.raw_response,
                     "provider_chain": provider_result.provider_chain,
+                    "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
                     "budget_state": budget_state.__dict__,
                     "bottleneck_tags": ["provider_transport"],
+                    "runtime_state": "no_action_response",
+                    "runtime_state_detail": "The provider returned no usable tool calls.",
+                    "selected_provider": provider_result.provider,
+                    "response_type": provider_result.response_type,
+                    "parsed_tool_call_count": 0,
+                    "failure_reason": provider_result.failure_reason or "No usable tool call returned",
                 },
             )
 
         actions, assumptions, metadata, code = self._resolve_tool_calls(tool_calls, context)
+        runtime_state = provider_result.runtime_state
+        runtime_state_detail = (
+            f"Valid action batch ready via fallback provider {provider_result.provider}."
+            if runtime_state == "fallback_provider_invoked"
+            else f"Valid action batch ready from {provider_result.provider}."
+        )
+        if not actions and not code:
+            failure_reason = "The provider response was structured but did not resolve into executable actions."
+            log_structured(
+                _LOGGER,
+                "non_actionable_response_rejected",
+                {
+                    "provider": provider_result.provider,
+                    "model": provider_result.model,
+                    "transport": provider_result.transport,
+                    "runtime_state": "no_action_response",
+                    "failure_reason": failure_reason,
+                },
+                level="error",
+            )
+            return DirectorTurn(
+                status="error",
+                message=failure_reason,
+                narration=failure_reason,
+                understanding="The Director returned structured output that could not be turned into executable work.",
+                plan=["surface a structured failure"],
+                intended_actions=self._intended_actions(tool_calls),
+                expected_outcome="No execution could be prepared.",
+                continue_loop=False,
+                error=failure_reason,
+                provider=provider_result.provider,
+                model=provider_result.model,
+                metadata={
+                    "provider_result": provider_result.raw_response,
+                    "provider_chain": provider_result.provider_chain,
+                    "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
+                    "budget_state": budget_state.__dict__,
+                    "bottleneck_tags": ["provider_transport"],
+                    "runtime_state": "no_action_response",
+                    "runtime_state_detail": failure_reason,
+                    "selected_provider": provider_result.provider,
+                    "response_type": provider_result.response_type,
+                    "parsed_tool_call_count": len(provider_result.tool_calls),
+                    "failure_reason": failure_reason,
+                },
+            )
         metadata = dict(metadata)
         metadata.update(
             {
                 "provider": provider_result.provider,
                 "model": provider_result.model,
+                "transport": provider_result.transport,
                 "provider_result": provider_result.raw_response,
                 "provider_chain": provider_result.provider_chain or [f"{provider_result.provider}:{provider_result.model}"],
+                "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
                 "code": code,
                 "assumptions": [
                     {"key": item.key, "value": item.value, "reason": item.reason}
@@ -625,7 +729,27 @@ class DirectorLoop:
                 "observation_summary": _latest_observation_summary(context),
                 "completion_mode_active": budget_state.completion_mode_active,
                 "turn_index": context.iteration,
+                "runtime_state": runtime_state,
+                "runtime_state_detail": runtime_state_detail,
+                "selected_provider": provider_result.provider,
+                "response_type": provider_result.response_type,
+                "parsed_tool_call_count": len(provider_result.tool_calls),
+                "failure_reason": "",
             }
+        )
+        log_structured(
+            _LOGGER,
+            "action_batch_accepted",
+            {
+                "provider": provider_result.provider,
+                "model": provider_result.model,
+                "transport": provider_result.transport,
+                "runtime_state": runtime_state,
+                "response_type": provider_result.response_type,
+                "parsed_tool_call_count": len(provider_result.tool_calls),
+                "selected_action_count": len(actions),
+                "selected_action_families": metadata.get("action_families", []),
+            },
         )
         return DirectorTurn(
             status="ok",

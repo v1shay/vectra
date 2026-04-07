@@ -13,13 +13,16 @@ DEFAULT_OLLAMA_PRIMARY = "qwen2.5-coder:32b"
 DEFAULT_OLLAMA_SECONDARY = "deepseek-coder-v2:16b"
 DEFAULT_DIRECTOR_MODEL = "gpt-5.1"
 DEFAULT_CONTROLLER_MODEL = "grok-4.2-reasoning"
+DEFAULT_DIRECTOR_TRANSPORT = "responses"
+DEFAULT_CONTROLLER_TRANSPORT = "responses"
 
 
 @dataclass(frozen=True)
 class EndpointConfig:
     provider: str
+    family: str
     base_url: str
-    api_key: str
+    api_key: str | None
     model: str
     transport: str = "responses"
 
@@ -69,11 +72,13 @@ def _read_int_env(name: str, default: int) -> int:
 def _read_endpoint(
     *,
     provider: str,
+    family: str,
     base_url_vars: tuple[str, ...],
     api_key_vars: tuple[str, ...],
     model_vars: tuple[str, ...],
     default_model: str,
     transport: str = "responses",
+    transport_vars: tuple[str, ...] = (),
 ) -> EndpointConfig | None:
     base_url = ""
     api_key = ""
@@ -93,12 +98,18 @@ def _read_endpoint(
         if candidate:
             model = candidate
             break
+    for var_name in transport_vars:
+        candidate = os.getenv(var_name, "").strip().lower()
+        if candidate:
+            transport = candidate
+            break
     if not model:
         model = default_model
     if not (base_url and api_key):
         return None
     return EndpointConfig(
         provider=provider,
+        family=family,
         base_url=base_url,
         api_key=api_key,
         model=model,
@@ -109,17 +120,23 @@ def _read_endpoint(
 def load_runtime_config() -> RuntimeConfig:
     controller = _read_endpoint(
         provider="xai-controller",
+        family="xai",
         base_url_vars=("VECTRA_CONTROLLER_BASE_URL",),
         api_key_vars=("VECTRA_CONTROLLER_API_KEY",),
         model_vars=("VECTRA_CONTROLLER_MODEL",),
         default_model=DEFAULT_CONTROLLER_MODEL,
+        transport=DEFAULT_CONTROLLER_TRANSPORT,
+        transport_vars=("VECTRA_CONTROLLER_TRANSPORT",),
     )
     director = _read_endpoint(
         provider="openai-director",
+        family="openai",
         base_url_vars=("VECTRA_DIRECTOR_BASE_URL", "VECTRA_LLM_BASE_URL"),
         api_key_vars=("VECTRA_DIRECTOR_API_KEY", "VECTRA_LLM_API_KEY"),
         model_vars=("VECTRA_DIRECTOR_MODEL", "VECTRA_LLM_MODEL"),
         default_model=DEFAULT_DIRECTOR_MODEL,
+        transport=DEFAULT_DIRECTOR_TRANSPORT,
+        transport_vars=("VECTRA_DIRECTOR_TRANSPORT",),
     )
     return RuntimeConfig(
         controller=controller,

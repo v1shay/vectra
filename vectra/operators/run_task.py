@@ -77,6 +77,11 @@ def _set_phase(scene: bpy.types.Scene, phase: str) -> None:
     scene.vectra_phase = phase
 
 
+def _set_runtime_state(scene: bpy.types.Scene, runtime_state: str) -> None:
+    if hasattr(scene, "vectra_runtime_state"):
+        scene.vectra_runtime_state = runtime_state
+
+
 def _append_transcript(scene: bpy.types.Scene, message: str | None) -> None:
     if not message:
         return
@@ -92,9 +97,26 @@ def _sync_history(scene: bpy.types.Scene, state: AgentLoopState | None) -> None:
     scene.vectra_history_json = json.dumps(history)
 
 
-def _apply_ui_state(scene: bpy.types.Scene, *, status: str, phase: str) -> None:
+def _apply_ui_state(
+    scene: bpy.types.Scene,
+    *,
+    status: str,
+    phase: str,
+    runtime_state: str | None = None,
+) -> None:
     _set_phase(scene, phase)
     scene.vectra_status = status
+    if runtime_state is not None:
+        _set_runtime_state(scene, runtime_state)
+
+
+def _runtime_state_from_metadata(metadata: dict[str, Any] | None, default: str = "") -> str:
+    if not isinstance(metadata, dict):
+        return default
+    runtime_state = metadata.get("runtime_state")
+    if isinstance(runtime_state, str) and runtime_state.strip():
+        return runtime_state.strip()
+    return default
 
 
 def _is_poll_timer_registered() -> bool:
@@ -224,7 +246,12 @@ def _start_legacy_request(context: bpy.types.Context) -> None:
         "images": [],
     }
     scene.vectra_request_in_flight = True
-    _apply_ui_state(scene, status="Sending request...", phase="sending")
+    _apply_ui_state(
+        scene,
+        status="Awaiting model response...",
+        phase="sending",
+        runtime_state="awaiting_model_response",
+    )
     _start_worker(payload, request_kind="legacy", scene_name=scene.name)
 
 
@@ -256,7 +283,12 @@ def _start_agent_iteration(context: bpy.types.Context) -> None:
     }
     scene.vectra_request_in_flight = True
     scene.vectra_pending_question = ""
-    _apply_ui_state(scene, status="Observing and planning the next step...", phase="working")
+    _apply_ui_state(
+        scene,
+        status="Awaiting model response...",
+        phase="working",
+        runtime_state="awaiting_model_response",
+    )
     _start_worker(payload, request_kind="agent_step", scene_name=scene.name)
 
 
@@ -265,24 +297,49 @@ def _handle_legacy_result(scene: bpy.types.Scene, payload: dict[str, Any]) -> fl
     actions = payload.get("actions", [])
     response_status = str(payload.get("status", "error")).strip().lower()
     planner_message = str(payload.get("message", "No actions returned")).strip()
+    response_metadata = payload.get("metadata", {})
+    runtime_state = _runtime_state_from_metadata(response_metadata, "valid_action_batch_ready" if actions else "")
     if response_status == "ok" and actions:
         try:
+            _apply_ui_state(
+                scene,
+                status=str(response_metadata.get("runtime_state_detail", "Valid action batch ready")).strip()
+                or "Valid action batch ready",
+                phase="working",
+                runtime_state=runtime_state or "valid_action_batch_ready",
+            )
             report = _get_execution_engine().run(bpy.context, actions)
         except Exception:  # pragma: no cover - defensive safeguard for Blender runtime
             logger.exception("Unexpected Vectra execution failure")
-            _apply_ui_state(scene, status="Execution failed", phase="error")
+            _apply_ui_state(
+                scene,
+                status="Execution failed",
+                phase="error",
+                runtime_state=runtime_state or "provider_transport_failure",
+            )
         else:
             if report.success:
                 _apply_ui_state(
                     scene,
                     status=f"Executed {len(report.results)} action(s) successfully",
                     phase="success",
+                    runtime_state=runtime_state or "valid_action_batch_ready",
                 )
             else:
                 failure_status = report.message or f"Failed at {report.failed_action_id or 'unknown'}"
-                _apply_ui_state(scene, status=failure_status, phase="error")
+                _apply_ui_state(
+                    scene,
+                    status=failure_status,
+                    phase="error",
+                    runtime_state=runtime_state or "provider_transport_failure",
+                )
     else:
-        _apply_ui_state(scene, status=planner_message, phase="error")
+        _apply_ui_state(
+            scene,
+            status=planner_message,
+            phase="error",
+            runtime_state=runtime_state or "provider_transport_failure",
+        )
 
     scene.vectra_request_in_flight = False
     _finalize_request()
@@ -417,6 +474,10 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
     narration = str(response.get("narration", "")).strip()
     assumptions = response.get("assumptions", [])
     response_metadata = response.get("metadata", {})
+    runtime_state = _runtime_state_from_metadata(response_metadata, "")
+    runtime_state_detail = ""
+    if isinstance(response_metadata, dict):
+        runtime_state_detail = str(response_metadata.get("runtime_state_detail", "")).strip()
     if isinstance(response_metadata, dict):
         state.budget_state = dict(response_metadata.get("budget_state", {})) if isinstance(response_metadata.get("budget_state"), dict) else {}
     if narration:
@@ -455,17 +516,41 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
         question = str(response.get("question", "")).strip() or "I need clarification before I continue."
         scene.vectra_pending_question = question
         _append_transcript(scene, question)
-        _apply_ui_state(scene, status=question, phase="clarifying")
+        _apply_ui_state(
+            scene,
+            status=question,
+            phase="clarifying",
+            runtime_state=runtime_state or "valid_action_batch_ready",
+        )
         scene.vectra_request_in_flight = False
         _finalize_request()
         return None
 
     if response_status == "error":
         message = str(response.get("message", "Agent step failed")).strip()
-        _apply_ui_state(scene, status=message, phase="error")
+        _apply_ui_state(
+            scene,
+            status=message,
+            phase="error",
+            runtime_state=runtime_state or "provider_transport_failure",
+        )
         scene.vectra_request_in_flight = False
         _finalize_request()
         return None
+
+    if runtime_state:
+        ready_status = runtime_state_detail or {
+            "fallback_provider_invoked": "Valid action batch ready from fallback provider.",
+            "valid_action_batch_ready": "Valid action batch ready.",
+        }.get(runtime_state, narration or "Prepared the next step.")
+        _apply_ui_state(
+            scene,
+            status=ready_status,
+            phase="working",
+            runtime_state=runtime_state,
+        )
+        if ready_status != narration:
+            _append_transcript(scene, ready_status)
 
     before_scene = _build_scene_state(bpy.context)
     try:
@@ -535,7 +620,12 @@ def _poll_request_result() -> float | None:
     if result_type == "error":
         error_message = str(payload).strip() if payload is not None else "Connection failed"
         scene.vectra_request_in_flight = False
-        _apply_ui_state(scene, status=error_message, phase="error")
+        _apply_ui_state(
+            scene,
+            status=error_message,
+            phase="error",
+            runtime_state="provider_transport_failure",
+        )
         _finalize_request()
         return None
 
@@ -555,6 +645,8 @@ def cleanup_request_state() -> None:
             scene.vectra_phase = "idle"
             if hasattr(scene, "vectra_status"):
                 scene.vectra_status = "Idle"
+        if hasattr(scene, "vectra_runtime_state"):
+            scene.vectra_runtime_state = "idle"
         if hasattr(scene, "vectra_pending_question"):
             scene.vectra_pending_question = ""
         if hasattr(scene, "vectra_iteration"):
@@ -598,13 +690,15 @@ class VECTRA_OT_run_task(bpy.types.Operator):
             if _request_thread is not None and _request_thread.is_alive():
                 scene.vectra_request_in_flight = True
                 _set_phase(scene, "sending")
-                scene.vectra_status = "Sending request..."
+                scene.vectra_status = "Awaiting model response..."
+                _set_runtime_state(scene, "awaiting_model_response")
                 return {"CANCELLED"}
 
             scene.vectra_agent_transcript = ""
             scene.vectra_pending_question = ""
             scene.vectra_iteration = 0
             scene.vectra_history_json = "[]"
+            _set_runtime_state(scene, "idle")
             if _is_poll_timer_registered():
                 bpy.app.timers.unregister(_poll_request_result)
             bpy.app.timers.register(_poll_request_result, first_interval=0.1)

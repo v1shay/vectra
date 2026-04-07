@@ -35,6 +35,11 @@ if bpy is not None:
             description="Current Vectra request phase",
             default="idle",
         ),
+        "vectra_runtime_state": lambda: bpy.props.StringProperty(
+            name="Runtime State",
+            description="Detailed runtime state from the Vectra backend",
+            default="idle",
+        ),
         "vectra_request_in_flight": lambda: bpy.props.BoolProperty(
             name="Request In Flight",
             description="Whether a Vectra runtime request is currently running",
