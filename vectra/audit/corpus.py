@@ -12,6 +12,7 @@ class AuditCase:
     expects_animation: bool = False
     expects_lighting: bool = False
     expects_camera: bool = False
+    modes: tuple[str, ...] | None = None
 
 
 DEFAULT_MODES = ("vectra-dev", "vectra-code")
@@ -26,6 +27,24 @@ DEFAULT_SETUP_IDS = (
 )
 
 AUDIT_CASES: tuple[AuditCase, ...] = (
+    AuditCase(
+        (
+            "Create a coherent, cinematic interior scene with one clear focal point. Build real structure, "
+            "not random primitives: include a floor, surrounding room elements, and at least one intentional "
+            "multi-part object that reads as a designed piece of furniture or decor. Arrange the scene so the "
+            "focal point is obvious, reduce overlap, add lighting that makes the scene readable and appealing, "
+            "and frame it with the camera. Then add a short visible animation where either the camera or one of "
+            "the lights moves across the scene in a way that improves the presentation. Finish only when the "
+            "result feels intentionally composed rather than just populated with objects."
+        ),
+        "empty-scene",
+        expects_scene=True,
+        expects_composite=True,
+        expects_animation=True,
+        expects_lighting=True,
+        expects_camera=True,
+        modes=("vectra-dev",),
+    ),
     AuditCase("make something cool", "empty-scene", expects_scene=True, expects_lighting=True, expects_camera=True),
     AuditCase(
         "build a futuristic room with floating objects",
