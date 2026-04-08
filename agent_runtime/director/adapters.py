@@ -129,6 +129,11 @@ def _response_type_for_tool_name(tool_name: str) -> str:
     return "tool_calls"
 
 
+def _responses_max_output_tokens(tool_count: int) -> int:
+    # Keep OpenRouter-compatible Responses requests inside a sane credit budget.
+    return 1024 if tool_count else 512
+
+
 class BaseProviderAdapter(ABC):
     family: str = ""
     transport: str = ""
@@ -366,11 +371,13 @@ class StructuredResponsesAdapter(HttpJsonProviderAdapter):
         instructions = request.instructions
         if request.corrective_hint:
             instructions = f"{instructions}\n\n{request.corrective_hint}"
+        max_output_tokens = _responses_max_output_tokens(len(request.tools))
         payload = {
             "model": endpoint.model,
             "input": request.user_input,
             "instructions": instructions,
             "tools": request.tools,
+            "max_output_tokens": max_output_tokens,
         }
         if request.tools:
             payload["tool_choice"] = "auto"
@@ -385,6 +392,7 @@ class StructuredResponsesAdapter(HttpJsonProviderAdapter):
                 "instruction_chars": len(instructions),
                 "structured_tools": True,
                 "prompt_embeds_tools": False,
+                "max_output_tokens": max_output_tokens,
             },
         )
 

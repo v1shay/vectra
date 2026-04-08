@@ -62,6 +62,8 @@ def test_controller_uses_xai_profile(monkeypatch: pytest.MonkeyPatch) -> None:
                 parsed=ParsedProviderResponse(
                     assistant_text='{"needs_scene_context":true,"needs_visual_feedback":true,"complexity":"medium"}',
                     response_type="message_only",
+                    parse_status="no_action_response",
+                    failure_reason="Provider returned no tool calls.",
                 ),
                 attempt=ProviderAttempt(
                     provider=config.provider,
