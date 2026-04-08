@@ -583,8 +583,10 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
         execution_message = str(exc)
         execution_details = {"kind": "error", "message": execution_message}
 
+    execution_payload = response.get("execution", {})
+    normalized_execution_payload = execution_payload if isinstance(execution_payload, dict) else {}
     after_scene = _build_scene_state(bpy.context)
-    verification = summarize_scene_diff(before_scene, after_scene, execution_payload if isinstance(execution_payload, dict) else None)
+    verification = summarize_scene_diff(before_scene, after_scene, normalized_execution_payload)
     state.history.append(
         _history_entry(
             state.iteration,
@@ -610,7 +612,7 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
         scene,
         response,
         success=success,
-        execution_payload=execution_payload if isinstance(execution_payload, dict) else {},
+        execution_payload=normalized_execution_payload,
         verification=verification,
     )
 
