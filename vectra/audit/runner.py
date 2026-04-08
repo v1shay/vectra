@@ -218,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         cases = list(AUDIT_CASES[: args.limit or len(AUDIT_CASES)])
         for mode in args.modes:
             for case_index, case in enumerate(cases, start=1):
+                if case.modes is not None and mode not in case.modes:
+                    continue
                 artifact_path = output_dir / f"{mode}-{case_index:02d}.json"
                 artifact = _run_blender_case(
                     args.blender_path,
