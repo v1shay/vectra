@@ -13,7 +13,11 @@ from .registry import register_tool
 
 SUPPORTED_PRIMITIVES = {
     "cube": "primitive_cube_add",
+    "cylinder": "primitive_cylinder_add",
+    "cone": "primitive_cone_add",
+    "ico_sphere": "primitive_ico_sphere_add",
     "plane": "primitive_plane_add",
+    "torus": "primitive_torus_add",
     "uv_sphere": "primitive_uv_sphere_add",
 }
 
@@ -34,8 +38,8 @@ def _resolve_created_object(context: Any) -> Any:
 class CreatePrimitiveTool(BaseTool):
     name = "mesh.create_primitive"
     description = (
-        "Create a new basic shape in the scene, such as a cube or box, a flat plane or square "
-        "surface, or a UV sphere for spheres, balls, and other round 3D shapes."
+        "Create a new basic shape in the scene, such as a cube or box, cylinder, cone, torus, "
+        "flat plane, UV sphere, or ico sphere."
     )
     input_schema = {
         "type": {
