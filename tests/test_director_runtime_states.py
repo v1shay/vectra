@@ -242,3 +242,85 @@ def test_custom_provider_adapter_can_be_registered_without_loop_changes(monkeypa
     assert result.provider == "openai-director"
     assert result.tool_calls[0].name == "mesh.create_primitive"
     assert result.runtime_state == "valid_action_batch_ready"
+
+
+def test_broad_prompt_single_action_triggers_validation_retry(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_controller",
+        lambda prompt, scene_state: ControllerDecision(),
+    )
+    responses = [
+        ProviderResult(
+            provider="openai-director",
+            model="gpt-5.1",
+            parsed=ParsedProviderResponse(
+                assistant_text="I will start with the floor.",
+                tool_calls=[ToolCall(name="mesh.create_primitive", arguments={"type": "plane", "name": "Ground"})],
+                response_type="tool_calls",
+            ),
+            runtime_state="valid_action_batch_ready",
+        ),
+        ProviderResult(
+            provider="openai-director",
+            model="gpt-5.1",
+            parsed=ParsedProviderResponse(
+                assistant_text="I will establish the floor and the key light together.",
+                tool_calls=[
+                    ToolCall(name="mesh.create_primitive", arguments={"type": "plane", "name": "Ground"}),
+                    ToolCall(name="light.create", arguments={"type": "AREA"}),
+                ],
+                response_type="tool_calls",
+            ),
+            runtime_state="valid_action_batch_ready",
+        ),
+    ]
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_director",
+        lambda prompt_text, tools, allow_complete=False: responses.pop(0),
+    )
+
+    turn = DirectorLoop().step(_context("make a coherent cinematic room"))
+
+    assert turn.status == "ok"
+    assert turn.metadata["validation_retry_used"] is True
+    assert len(turn.metadata["actions"]) == 2
+
+
+def test_invalid_tool_after_retry_returns_tool_validation_failure(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_controller",
+        lambda prompt, scene_state: ControllerDecision(),
+    )
+    responses = [
+        ProviderResult(
+            provider="openai-director",
+            model="gpt-5.1",
+            parsed=ParsedProviderResponse(
+                assistant_text="I will create a cylinder.",
+                tool_calls=[ToolCall(name="mesh.create_cylinder", arguments={"name": "LampBase"})],
+                response_type="tool_calls",
+            ),
+            runtime_state="valid_action_batch_ready",
+        ),
+        ProviderResult(
+            provider="openai-director",
+            model="gpt-5.1",
+            parsed=ParsedProviderResponse(
+                assistant_text="I will create a cylinder.",
+                tool_calls=[ToolCall(name="mesh.create_cylinder", arguments={"name": "LampBase"})],
+                response_type="tool_calls",
+            ),
+            runtime_state="valid_action_batch_ready",
+        ),
+    ]
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_director",
+        lambda prompt_text, tools, allow_complete=False: responses.pop(0),
+    )
+
+    turn = DirectorLoop().step(_context("make a nice lamp"))
+
+    assert turn.status == "error"
+    assert turn.metadata["runtime_state"] == "tool_validation_failure"
+    assert turn.metadata["validation_retry_used"] is True
+    assert "mesh.create_cylinder" in turn.metadata["failure_reason"]
