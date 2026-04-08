@@ -50,6 +50,94 @@ def _keyframe_count(obj: Any) -> int:
     return total
 
 
+def _animated_property_name(data_path: str) -> str:
+    normalized = data_path.strip().lower()
+    if normalized.startswith("location"):
+        return "location"
+    if normalized.startswith("rotation_euler"):
+        return "rotation"
+    if normalized.startswith("scale"):
+        return "scale"
+    if normalized.endswith("energy"):
+        return "light_energy"
+    if normalized.endswith("lens"):
+        return "camera_lens"
+    return normalized or "unknown"
+
+
+def _animation_summary(obj: Any) -> dict[str, Any]:
+    animation_data = getattr(obj, "animation_data", None)
+    action = getattr(animation_data, "action", None)
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves is None:
+        return {
+            "frame_start": None,
+            "frame_end": None,
+            "animated_properties": [],
+            "max_property_deltas": {},
+            "max_transform_delta": 0.0,
+            "light_energy_delta": 0.0,
+            "camera_lens_delta": 0.0,
+            "visible_motion": False,
+        }
+
+    frame_start: float | None = None
+    frame_end: float | None = None
+    animated_properties: set[str] = set()
+    max_property_deltas: dict[str, float] = {}
+    max_transform_delta = 0.0
+    light_energy_delta = 0.0
+    camera_lens_delta = 0.0
+
+    for curve in fcurves:
+        keyframe_points = getattr(curve, "keyframe_points", [])
+        if not keyframe_points:
+            continue
+        frames: list[float] = []
+        values: list[float] = []
+        for point in keyframe_points:
+            co = getattr(point, "co", ())
+            if len(co) < 2:
+                continue
+            frames.append(float(co[0]))
+            values.append(float(co[1]))
+        if not frames or not values:
+            continue
+        property_name = _animated_property_name(str(getattr(curve, "data_path", "")))
+        animated_properties.add(property_name)
+        frame_start = min(frame_start, min(frames)) if frame_start is not None else min(frames)
+        frame_end = max(frame_end, max(frames)) if frame_end is not None else max(frames)
+        delta = abs(max(values) - min(values))
+        max_property_deltas[property_name] = max(delta, max_property_deltas.get(property_name, 0.0))
+        if property_name in {"location", "rotation", "scale"}:
+            max_transform_delta = max(max_transform_delta, delta)
+        elif property_name == "light_energy":
+            light_energy_delta = max(light_energy_delta, delta)
+        elif property_name == "camera_lens":
+            camera_lens_delta = max(camera_lens_delta, delta)
+
+    visible_motion = bool(
+        frame_start is not None
+        and frame_end is not None
+        and frame_end > frame_start
+        and (
+            max_transform_delta >= 0.25
+            or light_energy_delta >= 25.0
+            or camera_lens_delta >= 3.0
+        )
+    )
+    return {
+        "frame_start": int(frame_start) if frame_start is not None else None,
+        "frame_end": int(frame_end) if frame_end is not None else None,
+        "animated_properties": sorted(animated_properties),
+        "max_property_deltas": max_property_deltas,
+        "max_transform_delta": max_transform_delta,
+        "light_energy_delta": light_energy_delta,
+        "camera_lens_delta": camera_lens_delta,
+        "visible_motion": visible_motion,
+    }
+
+
 def _scene_centroid(objects: list[dict[str, Any]]) -> list[float]:
     if not objects:
         return [0.0, 0.0, 0.0]
@@ -96,6 +184,7 @@ def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
         bounds = _approx_bounds(obj)
         materials = _material_names(obj)
         keyframe_count = _keyframe_count(obj)
+        animation_summary = _animation_summary(obj)
         object_record = {
             "name": obj.name,
             "type": obj.type,
@@ -116,6 +205,8 @@ def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
             "material_names": materials,
             "has_animation": keyframe_count > 0,
             "keyframe_count": keyframe_count,
+            "animation_summary": animation_summary,
+            "visible_animation": bool(animation_summary.get("visible_motion")),
         }
         if getattr(obj, "type", "") == "LIGHT":
             object_record["light_energy"] = float(getattr(getattr(obj, "data", None), "energy", 0.0))
