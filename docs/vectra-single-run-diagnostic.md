@@ -4,6 +4,8 @@ This file is the fastest high-signal test for the current state of Vectra.
 
 Use one prompt, in one fresh scene, and judge the run against the failure map below. The goal is not to prove one narrow prompt works. The goal is to expose whether Vectra currently has real potential as a general 3D agent.
 
+Right now Vectra is in a control-layer hardening stage, not a finished quality stage. That means the most honest ceiling prompt today should still demand real structure, composition, lighting, camera framing, and visible animation, but it should ask for a compact vignette that can plausibly finish inside the current budget.
+
 ## How To Use It
 
 1. Open a fresh Blender scene with the Vectra panel visible.
@@ -14,7 +16,15 @@ Use one prompt, in one fresh scene, and judge the run against the failure map be
 
 ## The Prompt To Paste
 
-This is the latest ceiling prompt the current system should be working toward:
+This is the current-stage ceiling prompt the system should be working toward right now:
+
+```text
+Create a compact, coherent interior vignette with one clear focal point. Build real structure, not random primitives: include a floor, at least one wall or other room-defining surface, and one intentional multi-part hero object that reads as designed furniture or decor. Keep the scene small enough to finish within the current turn budget. Arrange the scene so the focal point is obvious, reduce overlap, add at least one deliberate light, frame it with the camera, and add a short visible presentation animation using either the camera or a light. Finish only when the result feels like a staged corner of a room rather than a loose collection of shapes.
+```
+
+## Stretch Prompt
+
+This is still the later-stage prompt Vectra should grow into after the current hardening pass:
 
 ```text
 Create a coherent, cinematic interior scene with one clear focal point. Build real structure, not random primitives: include a floor, surrounding room elements, and at least one intentional multi-part object that reads as a designed piece of furniture or decor. Arrange the scene so the focal point is obvious, reduce overlap, add lighting that makes the scene readable and appealing, and frame it with the camera. Then add a short visible animation where either the camera or one of the lights moves across the scene in a way that improves the presentation. Finish only when the result feels intentionally composed rather than just populated with objects.
@@ -35,7 +45,7 @@ A single successful run on this prompt exercises almost every system that curren
 - animation
 - bounded completion
 
-If Vectra cannot make meaningful progress here, it is still blocked on core runtime or capability issues, not just missing polish.
+If Vectra cannot make meaningful progress here, it is still blocked on core control or capability issues, not just missing polish.
 
 ## What Counts As A Pass
 
@@ -43,7 +53,7 @@ Minimum pass:
 
 - the run starts making real scene changes quickly
 - the default cube is no longer the main output
-- the result includes actual room structure
+- the result includes actual room structure, even if it is only a compact vignette
 - there is at least one clearly intentional multi-part object
 - the scene has a light and camera placement that look deliberate
 - there is visible motion over time from either a light or the camera
@@ -79,7 +89,7 @@ Meaning:
 
 The system is still blocked before Blender execution. This is an upstream runtime/actionability problem, not a scene-building problem.
 
-### 2. It creates one or two primitives, then stalls
+### 2. It creates one or two primitives, then stalls or times out
 
 Symptoms:
 
@@ -87,17 +97,18 @@ Symptoms:
 - wall only
 - one cube or one plane
 - partial scaffold with no real continuation
+- floor plus wall but no lighting, camera, hero object, or animation
 
 Likely issue:
 
-- anti-stall logic is killing valid partial progress
+- completion control is still too weak after partial progress
 - Director is not producing strong enough first batches
 - batching is too weak
-- completion pressure is misfiring
+- composition follow-through is misfiring
 
 Meaning:
 
-The loop can act, but it cannot sustain construction.
+The loop can act and may even start structure correctly, but it still cannot sustain construction through a finished scene.
 
 ### 3. It produces random blocks instead of a designed scene
 
@@ -185,7 +196,7 @@ If this prompt fails, you can usually place the system in one of these buckets i
 - `Upstream runtime blocked`
   - no first executable action
 - `Construction loop weak`
-  - starts but cannot continue
+  - starts but cannot continue to a finish
 - `Modeling ceiling too low`
   - primitive spam instead of intentional objects
 - `Composition layer weak`
@@ -211,4 +222,4 @@ whether Vectra is becoming a real general-purpose 3D agent instead of a fragile 
 
 ## Recommendation
 
-If this single prompt cannot produce a coherent, intentionally composed, visibly animated scene, the next priority should still be runtime actionability, batching, composite-object quality, and animation verification before expanding into a much larger tool surface.
+If this current-stage prompt cannot produce a coherent, intentionally composed, visibly animated vignette, the next priority should be stronger completion control, stronger coordinated batches, and better light/camera/animation follow-through before expanding into a much larger tool surface.
