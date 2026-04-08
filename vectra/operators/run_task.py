@@ -418,7 +418,10 @@ def _maybe_continue_agent_loop(
             return None
     else:
         state.failure_signatures.pop(signature, None)
+    progress_score = float(verification.get("progress_score", 0.0) or 0.0)
     effective_change = bool(verification.get("meaningful_change"))
+    structural_progress = bool(verification.get("structural_progress"))
+    low_progress = bool(verification.get("low_progress"))
 
     if not success:
         if state.iteration >= MAX_AGENT_ITERATIONS:
@@ -432,7 +435,13 @@ def _maybe_continue_agent_loop(
         _start_agent_iteration(bpy.context)
         return 0.1
 
-    if not effective_change:
+    if structural_progress:
+        state.ineffective_turns = 0
+        _append_transcript(
+            scene,
+            f"Partial structural progress counted with score {progress_score:.2f}; the next turn should build on it instead of restarting.",
+        )
+    elif not effective_change:
         state.ineffective_turns += 1
         repeated_family = bool(action_families) and action_families == state.last_action_families
         if repeated_family:
@@ -444,6 +453,19 @@ def _maybe_continue_agent_loop(
             scene.vectra_request_in_flight = False
             _finalize_request()
             return None
+    elif low_progress:
+        state.ineffective_turns = min(state.ineffective_turns + 1, 2)
+        repeated_family = bool(action_families) and action_families == state.last_action_families
+        if repeated_family:
+            _append_transcript(
+                scene,
+                f"The last step made only limited progress (score {progress_score:.2f}) and reused the same action family, so the next turn must take a stronger scene-level swing.",
+            )
+        else:
+            _append_transcript(
+                scene,
+                f"The last step made limited progress (score {progress_score:.2f}), so the next turn should use a stronger coordinated batch.",
+            )
     else:
         state.ineffective_turns = 0
 
@@ -562,7 +584,7 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
         execution_details = {"kind": "error", "message": execution_message}
 
     after_scene = _build_scene_state(bpy.context)
-    verification = summarize_scene_diff(before_scene, after_scene)
+    verification = summarize_scene_diff(before_scene, after_scene, execution_payload if isinstance(execution_payload, dict) else None)
     state.history.append(
         _history_entry(
             state.iteration,
