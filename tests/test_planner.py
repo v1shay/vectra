@@ -28,6 +28,8 @@ class FakeAdapter:
 def test_runtime_settings_read_new_director_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VECTRA_DIRECTOR_TIMEOUT_SECONDS", "30")
     monkeypatch.setenv("VECTRA_DIRECTOR_MAX_RETRIES", "4")
+    monkeypatch.setenv("VECTRA_DIRECTOR_STEP_DEADLINE_SECONDS", "55")
+    monkeypatch.setenv("VECTRA_DIRECTOR_PROVIDER_ATTEMPT_BUDGET", "3")
     monkeypatch.setenv("VECTRA_DIRECTOR_TRANSPORT", "responses")
     monkeypatch.setenv("VECTRA_DIRECTOR_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("VECTRA_DIRECTOR_API_KEY", "test-openai")
@@ -39,10 +41,14 @@ def test_runtime_settings_read_new_director_env(monkeypatch: pytest.MonkeyPatch)
 
     assert settings.director_timeout_seconds == 30.0
     assert settings.director_max_retries == 4
+    assert settings.director_step_deadline_seconds == 55.0
+    assert settings.director_provider_attempt_budget == 3
     assert settings.ollama_primary_model == "qwen2.5-coder:32b"
     assert settings.ollama_secondary_model == "deepseek-coder-v2:16b"
     assert runtime_config.director is not None
     assert runtime_config.director.transport == "responses"
+    assert runtime_config.director_step_deadline_seconds == 55.0
+    assert runtime_config.director_provider_attempt_budget == 3
 
 
 def test_controller_uses_xai_profile(monkeypatch: pytest.MonkeyPatch) -> None:

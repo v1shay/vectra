@@ -70,6 +70,7 @@ def test_tool_registry_discover_loads_director_tool_surface() -> None:
     assert "object.delete_many" in discovered_tools
     assert "object.distribute" in discovered_tools
     assert "object.align" in discovered_tools
+    assert "object.add_modifier" in discovered_tools
     assert "scene.set_frame" in discovered_tools
     assert "object.keyframe" in discovered_tools
     assert "light.adjust" in discovered_tools
