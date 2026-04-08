@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from typing import Any
 
@@ -146,6 +147,35 @@ def _aggregate_failure(attempts: list[ProviderAttempt]) -> tuple[RuntimeState, s
     return last_non_success, last_failure_reason
 
 
+def _synthetic_attempt(
+    *,
+    config: EndpointConfig,
+    runtime_state: RuntimeState,
+    failure_reason: str,
+    provider_attempt_budget: int,
+    provider_attempts_used: int,
+    step_deadline_seconds: float,
+    request_timeout_seconds: float = 0.0,
+) -> ProviderAttempt:
+    return ProviderAttempt(
+        provider=config.provider,
+        model=config.model,
+        transport=config.transport,
+        runtime_state=runtime_state,
+        failure_reason=failure_reason,
+        request_metadata={
+            "provider_attempt_budget": provider_attempt_budget,
+            "provider_attempts_used": provider_attempts_used,
+            "step_deadline_seconds": step_deadline_seconds,
+            "request_timeout_seconds": request_timeout_seconds,
+        },
+        response_metadata={
+            "budget_exhausted": runtime_state == "provider_transport_failure",
+            "deadline_exceeded": runtime_state == "provider_deadline_exceeded",
+        },
+    )
+
+
 def _director_candidates(runtime) -> list[EndpointConfig]:
     candidates: list[EndpointConfig] = []
     if runtime.director is not None:
@@ -233,6 +263,10 @@ def call_director(
     runtime = load_runtime_config()
     attempts: list[ProviderAttempt] = []
     register_default_provider_adapters()
+    step_started_at = time.perf_counter()
+    deadline_at = step_started_at + runtime.director_step_deadline_seconds
+    provider_attempt_budget = runtime.director_provider_attempt_budget
+    provider_attempts_used = 0
 
     for candidate_index, config in enumerate(_director_candidates(runtime)):
         try:
@@ -261,6 +295,41 @@ def call_director(
             )
 
         for corrective_retry in range(2):
+            if provider_attempts_used >= provider_attempt_budget:
+                attempts.append(
+                    _synthetic_attempt(
+                        config=config,
+                        runtime_state="provider_transport_failure",
+                        failure_reason=(
+                            f"Director provider attempt budget of {provider_attempt_budget} was exhausted "
+                            f"before provider {config.provider} could be invoked."
+                        ),
+                        provider_attempt_budget=provider_attempt_budget,
+                        provider_attempts_used=provider_attempts_used,
+                        step_deadline_seconds=runtime.director_step_deadline_seconds,
+                    )
+                )
+                break
+
+            remaining_deadline_seconds = deadline_at - time.perf_counter()
+            if remaining_deadline_seconds <= 0.0:
+                attempts.append(
+                    _synthetic_attempt(
+                        config=config,
+                        runtime_state="provider_deadline_exceeded",
+                        failure_reason=(
+                            f"Director step deadline of {runtime.director_step_deadline_seconds:.1f}s expired "
+                            f"before provider {config.provider} could be invoked."
+                        ),
+                        provider_attempt_budget=provider_attempt_budget,
+                        provider_attempts_used=provider_attempts_used,
+                        step_deadline_seconds=runtime.director_step_deadline_seconds,
+                    )
+                )
+                break
+
+            request_timeout_seconds = min(runtime.director_timeout_seconds, remaining_deadline_seconds)
+            provider_attempts_used += 1
             request = ProviderRequest(
                 instructions=director_system_prompt(),
                 user_input=build_director_input(prompt_text),
@@ -270,10 +339,25 @@ def call_director(
             call_result = adapter.invoke(
                 config,
                 request,
-                timeout=runtime.director_timeout_seconds,
+                timeout=request_timeout_seconds,
                 max_retries=runtime.director_max_retries,
             )
-            attempt = call_result.attempt
+            attempt = replace(
+                call_result.attempt,
+                request_metadata={
+                    **call_result.attempt.request_metadata,
+                    "provider_attempt_budget": provider_attempt_budget,
+                    "provider_attempts_used": provider_attempts_used,
+                    "step_deadline_seconds": runtime.director_step_deadline_seconds,
+                    "request_timeout_seconds": round(request_timeout_seconds, 3),
+                },
+                response_metadata={
+                    **call_result.attempt.response_metadata,
+                    "elapsed_step_seconds": round(time.perf_counter() - step_started_at, 3),
+                    "remaining_deadline_seconds": round(max(deadline_at - time.perf_counter(), 0.0), 3),
+                    "corrective_retry": bool(corrective_retry),
+                },
+            )
             parsed = call_result.parsed
             if parsed is None:
                 attempts.append(attempt)
@@ -328,6 +412,8 @@ def call_director(
             )
             if corrective_retry == 0:
                 continue
+            break
+        if provider_attempts_used >= provider_attempt_budget or deadline_at - time.perf_counter() <= 0.0:
             break
 
     runtime_state, failure_reason = _aggregate_failure(attempts)
