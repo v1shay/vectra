@@ -78,6 +78,7 @@ def test_create_primitive_execute_applies_scale_and_rotation(monkeypatch) -> Non
         context=SimpleNamespace(active_object=None, object=None),
     )
     monkeypatch.setattr(mesh_tools_module, "bpy", fake_bpy)
+    monkeypatch.setattr(mesh_tools_module, "ensure_object_mode", lambda context: None)
 
     result = tool.execute(
         context,
