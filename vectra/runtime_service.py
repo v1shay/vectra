@@ -16,6 +16,7 @@ from .bridge.client import BridgeClientError, BridgeConnectionError, health_chec
 DEFAULT_BACKEND_STARTUP_TIMEOUT_SECONDS = 15.0
 HEALTH_POLL_INTERVAL_SECONDS = 0.1
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+RUNTIME_ENV_FILE_NAME = "runtime.env"
 PREFERRED_OLLAMA_MODEL_HINTS = (
     "qwen2.5-coder",
     "deepseek-coder-v2",
@@ -134,6 +135,46 @@ def _backend_log_path(repo_root: Path) -> Path:
     return log_dir / "backend.log"
 
 
+def _runtime_env_path(repo_root: Path) -> Path:
+    return repo_root / ".vectra" / RUNTIME_ENV_FILE_NAME
+
+
+def _apply_runtime_env_file(repo_root: Path, env: dict[str, str]) -> dict[str, str]:
+    env_path = _runtime_env_path(repo_root)
+    if not env_path.is_file():
+        return env
+
+    merged = dict(env)
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return merged
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        normalized_key = key.strip()
+        if not normalized_key:
+            continue
+
+        normalized_value = value.strip()
+        if (
+            len(normalized_value) >= 2
+            and normalized_value[0] == normalized_value[-1]
+            and normalized_value[0] in {"'", '"'}
+        ):
+            normalized_value = normalized_value[1:-1]
+        merged[normalized_key] = normalized_value
+    return merged
+
+
 def _normalize_http_url(raw_url: str) -> str:
     normalized = raw_url.strip()
     if not normalized:
@@ -240,6 +281,7 @@ def _start_backend_process(repo_root: Path, base_url: str) -> None:
         str(port),
     ]
     env = os.environ.copy()
+    env = _apply_runtime_env_file(repo_root, env)
     env["PYTHONUNBUFFERED"] = "1"
     env = _seed_llm_env_from_ollama(env)
 

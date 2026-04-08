@@ -136,3 +136,57 @@ def test_start_backend_process_uses_package_entrypoint_from_repo_root(
         "--port",
         "8000",
     ]
+
+
+def test_start_backend_process_loads_runtime_env_file_and_overrides_shell_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "vectra"
+    repo_root.mkdir()
+    venv_bin = repo_root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    python_bin = venv_bin / "python"
+    python_bin.write_text("", encoding="utf-8")
+    runtime_dir = repo_root / ".vectra"
+    runtime_dir.mkdir()
+    (runtime_dir / "runtime.env").write_text(
+        "\n".join(
+            [
+                "# local Vectra runtime configuration",
+                'export VECTRA_DIRECTOR_API_KEY="from-runtime-file"',
+                "VECTRA_DIRECTOR_BASE_URL=https://openrouter.ai/api/v1",
+                "VECTRA_DIRECTOR_MODEL=openai/gpt-5.1",
+                "VECTRA_LLM_MODEL=from-runtime-file-legacy",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VECTRA_LLM_MODEL", "from-shell")
+
+    launched: dict[str, object] = {}
+
+    class DummyProcess:
+        def poll(self) -> None:
+            return None
+
+    def fake_popen(command, cwd, env, stdout, stderr, text, start_new_session):
+        launched["command"] = command
+        launched["cwd"] = cwd
+        launched["env"] = env
+        launched["stdout"] = stdout
+        launched["stderr"] = stderr
+        launched["text"] = text
+        launched["start_new_session"] = start_new_session
+        return DummyProcess()
+
+    monkeypatch.setattr(runtime_service.subprocess, "Popen", fake_popen)
+
+    runtime_service._start_backend_process(repo_root, "http://127.0.0.1:8000")
+
+    launched_env = launched["env"]
+    assert isinstance(launched_env, dict)
+    assert launched_env["VECTRA_DIRECTOR_API_KEY"] == "from-runtime-file"
+    assert launched_env["VECTRA_DIRECTOR_BASE_URL"] == "https://openrouter.ai/api/v1"
+    assert launched_env["VECTRA_DIRECTOR_MODEL"] == "openai/gpt-5.1"
+    assert launched_env["VECTRA_LLM_MODEL"] == "from-runtime-file-legacy"
