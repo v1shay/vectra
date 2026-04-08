@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from vectra.tools.base import BaseTool
-from vectra.tools.registry import ToolRegistry, get_default_registry
+from vectra.tools.base import BaseTool, ToolValidationError
+from vectra.tools.registry import ToolNotFoundError, ToolRegistry, get_default_registry
 from vectra.utils.logging import get_vectra_logger, log_structured
 
 from .models import (
@@ -15,6 +15,7 @@ from .models import (
     DirectorTurn,
     ProviderResult,
     ToolCall,
+    ToolCallValidationIssue,
 )
 from .providers import ProviderError, call_controller, call_director
 from .resolver import ReferenceResolver
@@ -293,6 +294,73 @@ def _serialized_provider_attempts(provider_attempts: list[Any]) -> list[dict[str
     return serialized
 
 
+def _merge_provider_chains(*chains: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for chain in chains:
+        for value in chain:
+            if not isinstance(value, str) or not value or value in seen:
+                continue
+            merged.append(value)
+            seen.add(value)
+    return merged
+
+
+def _tool_validation_summary(issues: list[ToolCallValidationIssue]) -> str:
+    return "; ".join(f"{issue.tool_name}: {issue.reason}" for issue in issues[:4])
+
+
+def _needs_coordinated_batch(context: DirectorContext) -> bool:
+    prompt = context.user_prompt.strip().lower()
+    if not prompt:
+        return False
+    broad_keywords = (
+        "scene",
+        "room",
+        "interior",
+        "environment",
+        "coherent",
+        "cinematic",
+        "focal point",
+        "composition",
+        "lighting",
+        "camera",
+        "animate",
+        "animation",
+    )
+    if any(keyword in prompt for keyword in broad_keywords):
+        return True
+    objects = context.scene_state.get("objects", [])
+    return isinstance(objects, list) and len(objects) >= 3
+
+
+def _provider_error_turn(exc: ProviderError, budget_state: BudgetState) -> DirectorTurn:
+    runtime_state = getattr(exc, "runtime_state", "provider_transport_failure")
+    attempts = _serialized_provider_attempts(getattr(exc, "attempts", []))
+    return DirectorTurn(
+        status="error",
+        message=str(exc),
+        narration=str(exc),
+        understanding="The Director could not get a usable answer from any configured provider.",
+        plan=["surface the provider failure"],
+        intended_actions=[],
+        expected_outcome="No execution could be prepared.",
+        continue_loop=False,
+        error=str(exc),
+        metadata={
+            "bottleneck_tags": ["provider_transport"],
+            "budget_state": budget_state.__dict__,
+            "runtime_state": runtime_state,
+            "runtime_state_detail": str(exc),
+            "provider_attempts": attempts,
+            "selected_provider": None,
+            "response_type": "transport_failure",
+            "parsed_tool_call_count": 0,
+            "failure_reason": str(exc),
+        },
+    )
+
+
 class DirectorLoop:
     def __init__(self, registry: ToolRegistry | None = None) -> None:
         self.registry = registry or get_default_registry()
@@ -302,6 +370,155 @@ class DirectorLoop:
         schemas = [_tool_to_schema(self.registry.get(name)) for name in self.registry.list_tools()]
         schemas.extend(_control_tools(execution_mode))
         return schemas
+
+    def _validate_tool_calls(
+        self,
+        tool_calls: list[ToolCall],
+        context: DirectorContext,
+    ) -> tuple[list[ToolCall], list[ToolCallValidationIssue]]:
+        validated: list[ToolCall] = []
+        issues: list[ToolCallValidationIssue] = []
+        actionable_families: list[str] = []
+
+        for tool_call in tool_calls[:_BATCH_LIMIT]:
+            if not isinstance(tool_call.arguments, dict):
+                issues.append(
+                    ToolCallValidationIssue(
+                        tool_name=tool_call.name,
+                        reason="Tool arguments must be a JSON object.",
+                    )
+                )
+                continue
+
+            if tool_call.name == "task.complete":
+                summary = str(tool_call.arguments.get("summary", "")).strip()
+                if not summary:
+                    issues.append(
+                        ToolCallValidationIssue(
+                            tool_name=tool_call.name,
+                            reason="task.complete requires a non-empty summary.",
+                        )
+                    )
+                    continue
+                validated.append(ToolCall(name=tool_call.name, arguments={"summary": summary}))
+                continue
+
+            if tool_call.name == "task.clarify":
+                question = str(tool_call.arguments.get("question", "")).strip()
+                reason = str(tool_call.arguments.get("reason", "")).strip()
+                if not question or not reason:
+                    issues.append(
+                        ToolCallValidationIssue(
+                            tool_name=tool_call.name,
+                            reason="task.clarify requires both question and reason.",
+                        )
+                    )
+                    continue
+                validated.append(ToolCall(name=tool_call.name, arguments={"question": question, "reason": reason}))
+                continue
+
+            if tool_call.name == "python.execute_blender_snippet":
+                if context.execution_mode != "vectra-code":
+                    issues.append(
+                        ToolCallValidationIssue(
+                            tool_name=tool_call.name,
+                            reason="Dynamic Blender Python is only available in vectra-code mode.",
+                        )
+                    )
+                    continue
+                code = str(tool_call.arguments.get("code", "")).strip()
+                if not code:
+                    issues.append(
+                        ToolCallValidationIssue(
+                            tool_name=tool_call.name,
+                            reason="python.execute_blender_snippet requires non-empty code.",
+                        )
+                    )
+                    continue
+                validated.append(ToolCall(name=tool_call.name, arguments={"code": code}))
+                actionable_families.append(_tool_family(tool_call.name))
+                continue
+
+            try:
+                tool = self.registry.get(tool_call.name)
+            except ToolNotFoundError:
+                issues.append(
+                    ToolCallValidationIssue(
+                        tool_name=tool_call.name,
+                        reason="The tool is not registered in the live Vectra tool surface.",
+                    )
+                )
+                continue
+
+            try:
+                normalized_arguments = tool.validate_params(tool_call.arguments)
+            except ToolValidationError as exc:
+                issues.append(ToolCallValidationIssue(tool_name=tool_call.name, reason=str(exc)))
+                continue
+
+            validated.append(ToolCall(name=tool_call.name, arguments=normalized_arguments))
+            actionable_families.append(_tool_family(tool_call.name))
+
+        actionable_count = sum(
+            1
+            for tool_call in validated
+            if tool_call.name not in {"task.complete", "task.clarify"}
+        )
+        if not issues and actionable_count == 1 and _needs_coordinated_batch(context):
+            only_family = actionable_families[0] if actionable_families else "generic"
+            if only_family not in {"observe", "code"}:
+                issues.append(
+                    ToolCallValidationIssue(
+                        tool_name=validated[0].name,
+                        reason=(
+                            "This prompt needs a coordinated batch of 2 to 4 tool calls rather than a single local action."
+                        ),
+                    )
+                )
+
+        return validated, issues
+
+    def _validate_resolved_actions(
+        self,
+        actions: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[ToolCallValidationIssue]]:
+        validated_actions: list[dict[str, Any]] = []
+        issues: list[ToolCallValidationIssue] = []
+
+        for action in actions:
+            tool_name = str(action.get("tool", "")).strip()
+            params = action.get("params", {})
+            if not tool_name:
+                issues.append(ToolCallValidationIssue(tool_name="unknown", reason="Resolved action was missing a tool name."))
+                continue
+            try:
+                tool = self.registry.get(tool_name)
+            except ToolNotFoundError:
+                issues.append(
+                    ToolCallValidationIssue(
+                        tool_name=tool_name,
+                        reason="Resolved action referenced a tool that is not registered.",
+                    )
+                )
+                continue
+            try:
+                normalized_params = tool.validate_params(params if isinstance(params, dict) else {})
+            except ToolValidationError as exc:
+                issues.append(ToolCallValidationIssue(tool_name=tool_name, reason=str(exc)))
+                continue
+            validated_actions.append({**action, "params": normalized_params})
+
+        return validated_actions, issues
+
+    @staticmethod
+    def _tool_validation_retry_prompt(prompt_text: str, issues: list[ToolCallValidationIssue]) -> str:
+        return (
+            f"{prompt_text}\n\n"
+            "Validation correction:\n"
+            f"The previous tool batch was not executable because: {_tool_validation_summary(issues)}.\n"
+            "Return only supported tools with schema-valid arguments.\n"
+            "For broad scene, editing, or animation work, return a coordinated batch of 2 to 4 tool calls unless only one safe action truly exists."
+        )
 
     def _resolve_single_tool_call(
         self,
@@ -550,32 +767,103 @@ class DirectorLoop:
                 allow_complete=context.iteration > 1,
             )
         except ProviderError as exc:
-            runtime_state = getattr(exc, "runtime_state", "provider_transport_failure")
-            attempts = _serialized_provider_attempts(getattr(exc, "attempts", []))
-            return DirectorTurn(
-                status="error",
-                message=str(exc),
-                narration=str(exc),
-                understanding="The Director could not get a usable answer from any configured provider.",
-                plan=["surface the provider failure"],
-                intended_actions=[],
-                expected_outcome="No execution could be prepared.",
-                continue_loop=False,
-                error=str(exc),
-                metadata={
-                    "bottleneck_tags": ["provider_transport"],
-                    "budget_state": budget_state.__dict__,
-                    "runtime_state": runtime_state,
-                    "runtime_state_detail": str(exc),
-                    "provider_attempts": attempts,
-                    "selected_provider": None,
-                    "response_type": "transport_failure",
-                    "parsed_tool_call_count": 0,
-                    "failure_reason": str(exc),
-                },
-            )
+            return _provider_error_turn(exc, budget_state)
 
+        provider_attempts = list(provider_result.attempts)
+        provider_chain = _merge_provider_chains(
+            provider_result.provider_chain or [f"{provider_result.provider}:{provider_result.model}"]
+        )
         tool_calls = provider_result.tool_calls[:_BATCH_LIMIT]
+        validation_issues: list[ToolCallValidationIssue] = []
+        actions: list[dict[str, Any]] = []
+        assumptions: list[AssumptionRecord] = []
+        metadata: dict[str, Any] = {}
+        code: str | None = None
+        validation_retry_used = False
+
+        for _ in range(2):
+            if not tool_calls or tool_calls[0].name in {"task.complete", "task.clarify"}:
+                break
+
+            validated_tool_calls, validation_issues = self._validate_tool_calls(tool_calls, context)
+            if validation_issues:
+                if validation_retry_used:
+                    break
+                validation_retry_used = True
+                log_structured(
+                    _LOGGER,
+                    "tool_batch_validation_failed",
+                    {
+                        "provider": provider_result.provider,
+                        "model": provider_result.model,
+                        "transport": provider_result.transport,
+                        "issue_count": len(validation_issues),
+                        "issue_summary": _tool_validation_summary(validation_issues),
+                    },
+                    level="warning",
+                )
+                try:
+                    provider_result = call_director(
+                        prompt_text=self._tool_validation_retry_prompt(prompt_text, validation_issues),
+                        tools=tools,
+                        allow_complete=context.iteration > 1,
+                    )
+                except ProviderError as exc:
+                    return _provider_error_turn(exc, budget_state)
+                provider_attempts.extend(provider_result.attempts)
+                provider_chain = _merge_provider_chains(
+                    provider_chain,
+                    provider_result.provider_chain or [f"{provider_result.provider}:{provider_result.model}"],
+                )
+                tool_calls = provider_result.tool_calls[:_BATCH_LIMIT]
+                validation_issues = []
+                continue
+
+            actions, assumptions, metadata, code = self._resolve_tool_calls(validated_tool_calls, context)
+            validated_actions, action_issues = self._validate_resolved_actions(actions)
+            if action_issues:
+                validation_issues = action_issues
+                if validation_retry_used:
+                    break
+                validation_retry_used = True
+                log_structured(
+                    _LOGGER,
+                    "resolved_action_validation_failed",
+                    {
+                        "provider": provider_result.provider,
+                        "model": provider_result.model,
+                        "transport": provider_result.transport,
+                        "issue_count": len(validation_issues),
+                        "issue_summary": _tool_validation_summary(validation_issues),
+                    },
+                    level="warning",
+                )
+                try:
+                    provider_result = call_director(
+                        prompt_text=self._tool_validation_retry_prompt(prompt_text, validation_issues),
+                        tools=tools,
+                        allow_complete=context.iteration > 1,
+                    )
+                except ProviderError as exc:
+                    return _provider_error_turn(exc, budget_state)
+                provider_attempts.extend(provider_result.attempts)
+                provider_chain = _merge_provider_chains(
+                    provider_chain,
+                    provider_result.provider_chain or [f"{provider_result.provider}:{provider_result.model}"],
+                )
+                tool_calls = provider_result.tool_calls[:_BATCH_LIMIT]
+                actions = []
+                assumptions = []
+                metadata = {}
+                code = None
+                validation_issues = []
+                continue
+
+            tool_calls = validated_tool_calls
+            actions = validated_actions
+            validation_issues = []
+            break
+
         if tool_calls and tool_calls[0].name == "task.complete":
             summary = str(tool_calls[0].arguments.get("summary", "")).strip() or provider_result.assistant_text or "Task complete."
             return DirectorTurn(
@@ -591,8 +879,8 @@ class DirectorLoop:
                 model=provider_result.model,
                 metadata={
                     "provider_result": provider_result.raw_response,
-                    "provider_chain": provider_result.provider_chain,
-                    "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
+                    "provider_chain": provider_chain,
+                    "provider_attempts": _serialized_provider_attempts(provider_attempts),
                     "budget_state": budget_state.__dict__,
                     "bottleneck_tags": [],
                     "runtime_state": provider_result.runtime_state,
@@ -601,6 +889,7 @@ class DirectorLoop:
                     "response_type": provider_result.response_type,
                     "parsed_tool_call_count": len(provider_result.tool_calls),
                     "failure_reason": "",
+                    "validation_retry_used": validation_retry_used,
                 },
             )
 
@@ -621,8 +910,8 @@ class DirectorLoop:
                 model=provider_result.model,
                 metadata={
                     "provider_result": provider_result.raw_response,
-                    "provider_chain": provider_result.provider_chain,
-                    "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
+                    "provider_chain": provider_chain,
+                    "provider_attempts": _serialized_provider_attempts(provider_attempts),
                     "budget_state": budget_state.__dict__,
                     "bottleneck_tags": ["tool_gap"] if reason else [],
                     "runtime_state": provider_result.runtime_state,
@@ -631,6 +920,7 @@ class DirectorLoop:
                     "response_type": provider_result.response_type,
                     "parsed_tool_call_count": len(provider_result.tool_calls),
                     "failure_reason": reason,
+                    "validation_retry_used": validation_retry_used,
                 },
             )
 
@@ -649,8 +939,8 @@ class DirectorLoop:
                 model=provider_result.model,
                 metadata={
                     "provider_result": provider_result.raw_response,
-                    "provider_chain": provider_result.provider_chain,
-                    "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
+                    "provider_chain": provider_chain,
+                    "provider_attempts": _serialized_provider_attempts(provider_attempts),
                     "budget_state": budget_state.__dict__,
                     "bottleneck_tags": ["provider_transport"],
                     "runtime_state": "no_action_response",
@@ -659,10 +949,44 @@ class DirectorLoop:
                     "response_type": provider_result.response_type,
                     "parsed_tool_call_count": 0,
                     "failure_reason": provider_result.failure_reason or "No usable tool call returned",
+                    "validation_retry_used": validation_retry_used,
                 },
             )
 
-        actions, assumptions, metadata, code = self._resolve_tool_calls(tool_calls, context)
+        if validation_issues:
+            failure_reason = f"The provider produced unsupported or invalid tool calls: {_tool_validation_summary(validation_issues)}"
+            return DirectorTurn(
+                status="error",
+                message=failure_reason,
+                narration=failure_reason,
+                understanding="The Director returned tool calls that did not match the live tool surface or schema.",
+                plan=["request a stricter executable batch"],
+                intended_actions=self._intended_actions(tool_calls),
+                expected_outcome="No execution could be prepared.",
+                continue_loop=False,
+                error=failure_reason,
+                provider=provider_result.provider,
+                model=provider_result.model,
+                metadata={
+                    "provider_result": provider_result.raw_response,
+                    "provider_chain": provider_chain,
+                    "provider_attempts": _serialized_provider_attempts(provider_attempts),
+                    "budget_state": budget_state.__dict__,
+                    "bottleneck_tags": ["tool_grounding"],
+                    "runtime_state": "tool_validation_failure",
+                    "runtime_state_detail": failure_reason,
+                    "selected_provider": provider_result.provider,
+                    "response_type": provider_result.response_type,
+                    "parsed_tool_call_count": len(provider_result.tool_calls),
+                    "failure_reason": failure_reason,
+                    "tool_validation_issues": [
+                        {"tool_name": issue.tool_name, "reason": issue.reason}
+                        for issue in validation_issues
+                    ],
+                    "validation_retry_used": validation_retry_used,
+                },
+            )
+
         runtime_state = provider_result.runtime_state
         runtime_state_detail = (
             f"Valid action batch ready via fallback provider {provider_result.provider}."
@@ -697,8 +1021,8 @@ class DirectorLoop:
                 model=provider_result.model,
                 metadata={
                     "provider_result": provider_result.raw_response,
-                    "provider_chain": provider_result.provider_chain,
-                    "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
+                    "provider_chain": provider_chain,
+                    "provider_attempts": _serialized_provider_attempts(provider_attempts),
                     "budget_state": budget_state.__dict__,
                     "bottleneck_tags": ["provider_transport"],
                     "runtime_state": "no_action_response",
@@ -707,6 +1031,7 @@ class DirectorLoop:
                     "response_type": provider_result.response_type,
                     "parsed_tool_call_count": len(provider_result.tool_calls),
                     "failure_reason": failure_reason,
+                    "validation_retry_used": validation_retry_used,
                 },
             )
         metadata = dict(metadata)
@@ -716,8 +1041,8 @@ class DirectorLoop:
                 "model": provider_result.model,
                 "transport": provider_result.transport,
                 "provider_result": provider_result.raw_response,
-                "provider_chain": provider_result.provider_chain or [f"{provider_result.provider}:{provider_result.model}"],
-                "provider_attempts": _serialized_provider_attempts(provider_result.attempts),
+                "provider_chain": provider_chain,
+                "provider_attempts": _serialized_provider_attempts(provider_attempts),
                 "code": code,
                 "assumptions": [
                     {"key": item.key, "value": item.value, "reason": item.reason}
@@ -735,6 +1060,7 @@ class DirectorLoop:
                 "response_type": provider_result.response_type,
                 "parsed_tool_call_count": len(provider_result.tool_calls),
                 "failure_reason": "",
+                "validation_retry_used": validation_retry_used,
             }
         )
         log_structured(
