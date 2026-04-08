@@ -8,6 +8,8 @@ import vectra.tools.mesh_tools as mesh_tools_module
 import vectra.tools.object_tools as object_tools_module
 import vectra.tools.transform_tools as transform_tools_module
 from vectra.tools.base import ToolValidationError
+from vectra.tools.camera_tools import EnsureCameraTool
+from vectra.tools.light_tools import CreateLightTool
 from vectra.tools.mesh_tools import CreatePrimitiveTool
 from vectra.tools.object_tools import DuplicateObjectTool
 from vectra.tools.transform_tools import TransformObjectTool
@@ -32,6 +34,33 @@ def test_create_primitive_rejects_invalid_scale() -> None:
 
     with pytest.raises(ToolValidationError, match="'scale' must be a 3-item list or tuple"):
         tool.validate_params({"type": "cube", "scale": {"x": 1}})
+
+
+def test_create_primitive_accepts_rotation_euler_alias() -> None:
+    tool = CreatePrimitiveTool()
+
+    validated = tool.validate_params({"type": "cube", "rotation_euler": [0, 0, 1]})
+
+    assert validated["rotation"] == (0.0, 0.0, 1.0)
+
+
+def test_camera_ensure_accepts_rotation_euler_alias() -> None:
+    tool = EnsureCameraTool()
+
+    validated = tool.validate_params({"location": [1, 2, 3], "rotation_euler": [0.1, 0.2, 0.3]})
+
+    assert validated == {
+        "location": (1.0, 2.0, 3.0),
+        "rotation": (0.1, 0.2, 0.3),
+    }
+
+
+def test_light_create_accepts_rotation_euler_alias() -> None:
+    tool = CreateLightTool()
+
+    validated = tool.validate_params({"rotation_euler": [0.1, 0.2, 0.3]})
+
+    assert validated["rotation"] == (0.1, 0.2, 0.3)
 
 
 def test_create_primitive_execute_applies_scale_and_rotation(monkeypatch) -> None:
