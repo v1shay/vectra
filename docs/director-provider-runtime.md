@@ -11,17 +11,21 @@ Vectra's Director runtime now separates provider transport from Director control
    - executing provider-specific transport
    - parsing the raw response into a normalized `ParsedProviderResponse`
 4. The provider layer performs one bounded corrective retry when a response is non-actionable, then falls back to the next provider.
-5. The Director loop accepts only:
+5. The provider chain is bounded by a step-level deadline and a provider-attempt budget, so fallback cannot silently burn the whole run.
+6. The Director loop accepts only:
    - a valid executable tool batch
    - a constrained clarification request
    - a structured failure
-6. Runtime-state metadata is returned through the backend and surfaced directly in the Blender addon.
+7. The Director loop validates tool names and arguments before execution, performs one corrective retry when a tool batch is not executable, and only then surfaces a failure.
+8. Runtime-state metadata is returned through the backend and surfaced directly in the Blender addon.
 
 ## Runtime States
 
 - `awaiting_model_response`: the addon has dispatched a request and is waiting for the backend
 - `provider_transport_failure`: the provider request failed before a usable parse result
+- `provider_deadline_exceeded`: the provider request chain ran out of time before yielding a usable batch
 - `tool_call_parse_failure`: the provider responded, but the tool payload was malformed
+- `tool_validation_failure`: the provider returned tool names or arguments that do not match the live tool surface
 - `no_action_response`: the provider responded with narration or a non-actionable structure
 - `valid_action_batch_ready`: a valid executable first-step batch is ready
 - `fallback_provider_invoked`: a valid batch is ready, but it came from a fallback provider
@@ -29,7 +33,7 @@ Vectra's Director runtime now separates provider transport from Director control
 ## Boundaries
 
 - Provider adapters own request shape, HTTP transport, and raw-response parsing.
-- The Director loop owns actionability validation, reference resolution, and executable action selection.
+- The Director loop owns actionability validation, tool-surface validation, reference resolution, and executable action selection.
 - The Blender addon owns local in-flight UI state and displays backend runtime-state metadata without reclassifying failures.
 
 ## Extension Points
