@@ -316,6 +316,106 @@ def test_agent_result_surfaces_runtime_error_state_in_ui(
     assert scene.vectra_runtime_state == "provider_transport_failure"
 
 
+def test_agent_result_passes_execution_payload_into_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bpy = _make_fake_bpy()
+    scene = fake_bpy.types.Scene()
+    scene.name = "Scene"
+    scene.vectra_request_in_flight = True
+    scene.vectra_phase = "working"
+    scene.vectra_status = "Awaiting model response..."
+    scene.vectra_runtime_state = "awaiting_model_response"
+    scene.vectra_agent_transcript = ""
+    scene.vectra_pending_question = ""
+    scene.vectra_history_json = "[]"
+    scene.vectra_iteration = 1
+    fake_bpy.context.scene = scene
+    fake_bpy.data.scenes["Scene"] = scene
+
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    sys.modules.pop("vectra.operators.run_task", None)
+    run_task_module = _reload_module("vectra.operators.run_task")
+    run_task_module._agent_loop_state = run_task_module.AgentLoopState(
+        prompt="make a room",
+        execution_mode="vectra-dev",
+        iteration=1,
+    )
+
+    scene_states = iter(
+        [
+            {"objects": [], "groups": [], "lights": [], "active_camera": None},
+            {"objects": [{"name": "floor"}], "groups": [], "lights": [], "active_camera": None},
+        ]
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_summarize_scene_diff(before, after, execution_payload):
+        del before
+        del after
+        captured["verification_payload"] = execution_payload
+        return {
+            "summary": "Created floor.",
+            "meaningful_change": True,
+            "structural_progress": True,
+            "low_progress": False,
+            "progress_score": 1.2,
+        }
+
+    def _fake_maybe_continue(scene, response, *, success, execution_payload, verification):
+        del scene
+        del response
+        del success
+        del verification
+        captured["continue_payload"] = execution_payload
+        return 0.1
+
+    monkeypatch.setattr(run_task_module, "_build_scene_state", lambda context: next(scene_states))
+    monkeypatch.setattr(
+        run_task_module,
+        "_handle_agent_execution",
+        lambda scene, response: (
+            True,
+            "Executed 1 action successfully",
+            {"kind": "tool_actions", "actions": response["execution"]["actions"]},
+        ),
+    )
+    monkeypatch.setattr(run_task_module, "summarize_scene_diff", _fake_summarize_scene_diff)
+    monkeypatch.setattr(run_task_module, "_maybe_continue_agent_loop", _fake_maybe_continue)
+
+    result = run_task_module._handle_agent_result(
+        scene,
+        {
+            "status": "ok",
+            "message": "Prepared the next director step.",
+            "narration": "Prepared the next director step.",
+            "assumptions": [],
+            "metadata": {
+                "runtime_state": "valid_action_batch_ready",
+                "runtime_state_detail": "Valid action batch ready.",
+            },
+            "execution": {
+                "kind": "tool_actions",
+                "actions": [{"tool": "mesh.create_primitive", "params": {"type": "plane"}}],
+                "metadata": {"action_families": ["create", "structure"]},
+            },
+        },
+    )
+
+    assert result == 0.1
+    assert captured["verification_payload"] == {
+        "kind": "tool_actions",
+        "actions": [{"tool": "mesh.create_primitive", "params": {"type": "plane"}}],
+        "metadata": {"action_families": ["create", "structure"]},
+    }
+    assert captured["continue_payload"] == captured["verification_payload"]
+    assert [entry["role"] for entry in run_task_module._agent_loop_state.history] == [
+        "agent",
+        "execution",
+        "verification",
+    ]
+
+
 def test_bootstrap_register_replaces_stale_preferences_class(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
