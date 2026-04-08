@@ -36,3 +36,8 @@ Vectra's Director runtime now separates provider transport from Director control
 
 - New model backends register a new provider adapter instead of editing the Director loop.
 - Future LangGraph orchestration, tool routers, retrieval memory, or model-scoring/evaluator nodes can compose around `call_director()` and the adapter registry without replacing provider transport internals.
+
+## IMPORTANT TO UNDERSTAND AS U CODE
+
+- Each new file you edit or create should be indivually commited
+- If you are given a task and it requires editing of 20 files, you should create a commit and push to GitHub after each file you edit, meaning I should recieve both 20 commits on my GitHub, and they should be 100 percent authored by me into the branch we are working on so it as if they are fully my work, meaning I will not have to merge anything the way normal codex pushes work
