@@ -222,6 +222,47 @@ def test_structured_adapters_omit_tool_schema_from_prompt_but_text_adapters_embe
     assert "mesh.create_primitive" in ollama_request.payload["prompt"]
 
 
+def test_structured_responses_requests_apply_safe_output_caps() -> None:
+    endpoint = EndpointConfig(
+        provider="openai-director",
+        family="openai",
+        base_url="https://api.openai.com/v1",
+        api_key="test-openai",
+        model="gpt-5.4-mini",
+        transport="responses",
+    )
+    adapter = OpenAIResponsesAdapter()
+
+    request_with_tools = adapter.build_request(
+        endpoint,
+        ProviderRequest(
+            instructions="You are the director.",
+            user_input="Create a cube.",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "mesh.create_primitive",
+                    "description": "Create a primitive mesh.",
+                    "parameters": {"type": "object", "properties": {"type": {"type": "string"}}},
+                }
+            ],
+        ),
+    )
+    request_without_tools = adapter.build_request(
+        endpoint,
+        ProviderRequest(
+            instructions="You are the controller.",
+            user_input="Create a cube.",
+            tools=[],
+        ),
+    )
+
+    assert request_with_tools.payload["max_output_tokens"] == 1024
+    assert request_with_tools.request_metadata["max_output_tokens"] == 1024
+    assert request_without_tools.payload["max_output_tokens"] == 512
+    assert request_without_tools.request_metadata["max_output_tokens"] == 512
+
+
 def test_custom_provider_adapter_can_be_registered_without_loop_changes(monkeypatch) -> None:
     monkeypatch.setenv("VECTRA_DIRECTOR_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("VECTRA_DIRECTOR_API_KEY", "test-openai")

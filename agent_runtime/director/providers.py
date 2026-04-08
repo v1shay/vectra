@@ -237,10 +237,12 @@ def call_controller(prompt: str, scene_state: dict[str, Any]) -> ControllerDecis
         timeout=runtime.controller_timeout_seconds,
         max_retries=runtime.controller_max_retries,
     )
-    if result.parsed is None or result.parsed.parse_status != "ok":
+    if result.parsed is None:
         return ControllerDecision()
 
     parsed = _extract_json_object(result.parsed.assistant_text)
+    if not parsed:
+        return ControllerDecision()
     complexity = parsed.get("complexity")
     if complexity not in {"low", "medium", "high"}:
         complexity = "medium"
