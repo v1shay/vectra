@@ -53,3 +53,40 @@ def test_capture_viewport_screenshot_returns_unavailable_when_no_view3d_area(mon
 
     assert result["available"] is False
     assert "VIEW_3D" in result["reason"]
+
+
+def test_build_scene_state_includes_animation_summary(monkeypatch) -> None:
+    keyframe_points = [
+        SimpleNamespace(co=(1.0, 0.0)),
+        SimpleNamespace(co=(24.0, 2.5)),
+    ]
+    animation_curve = SimpleNamespace(data_path="location", keyframe_points=keyframe_points)
+    obj = SimpleNamespace(
+        name="AnimatedCube",
+        type="MESH",
+        select_get=lambda: False,
+        location=(0.0, 0.0, 0.0),
+        rotation_euler=(0.0, 0.0, 0.0),
+        scale=(1.0, 1.0, 1.0),
+        dimensions=(2.0, 2.0, 2.0),
+        parent=None,
+        children=[],
+        users_collection=[],
+        animation_data=SimpleNamespace(action=SimpleNamespace(fcurves=[animation_curve])),
+    )
+    fake_bpy = SimpleNamespace()
+    monkeypatch.setattr(observation_module, "bpy", fake_bpy)
+
+    scene_state = observation_module.build_scene_state(
+        SimpleNamespace(
+            scene=SimpleNamespace(frame_current=1, objects=[obj]),
+            active_object=None,
+            selected_objects=[],
+        )
+    )
+
+    animation_summary = scene_state["objects"][0]["animation_summary"]
+    assert animation_summary["frame_start"] == 1
+    assert animation_summary["frame_end"] == 24
+    assert animation_summary["animated_properties"] == ["location"]
+    assert animation_summary["visible_motion"] is True

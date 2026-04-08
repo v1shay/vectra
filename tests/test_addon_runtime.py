@@ -383,3 +383,99 @@ def test_current_dev_source_path_falls_back_to_short_addon_key(
     bootstrap_module.ADDON_PACKAGE_NAME = "bl_ext.user_default.vectra"
 
     assert bootstrap_module.current_dev_source_path() == "/tmp/vectra"
+
+
+def test_partial_structural_progress_continues_agent_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bpy = _make_fake_bpy()
+    scene = fake_bpy.types.Scene()
+    scene.name = "Scene"
+    scene.vectra_request_in_flight = True
+    scene.vectra_phase = "working"
+    scene.vectra_status = "Working"
+    scene.vectra_agent_transcript = ""
+    scene.vectra_runtime_state = "valid_action_batch_ready"
+    fake_bpy.context.scene = scene
+    fake_bpy.data.scenes["Scene"] = scene
+
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    sys.modules.pop("vectra.operators.run_task", None)
+    run_task_module = _reload_module("vectra.operators.run_task")
+    run_task_module._agent_loop_state = run_task_module.AgentLoopState(
+        prompt="make a room",
+        execution_mode="vectra-dev",
+        iteration=1,
+        ineffective_turns=2,
+    )
+
+    started: list[str] = []
+    monkeypatch.setattr(run_task_module, "_start_agent_iteration", lambda context: started.append("started"))
+    monkeypatch.setattr(run_task_module, "_finalize_request", lambda: started.append("finalize"))
+
+    result = run_task_module._maybe_continue_agent_loop(
+        scene,
+        {"status": "ok", "continue_loop": True},
+        success=True,
+        execution_payload={"actions": [], "metadata": {"action_families": ["create", "structure"]}},
+        verification={
+            "meaningful_change": True,
+            "structural_progress": True,
+            "low_progress": True,
+            "progress_score": 1.2,
+            "summary": "Created floor and back wall.",
+        },
+    )
+
+    assert result == 0.1
+    assert run_task_module._agent_loop_state.ineffective_turns == 0
+    assert started == ["started"]
+    assert "Partial structural progress counted" in scene.vectra_agent_transcript
+
+
+def test_repeated_no_progress_still_stops_agent_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bpy = _make_fake_bpy()
+    scene = fake_bpy.types.Scene()
+    scene.name = "Scene"
+    scene.vectra_request_in_flight = True
+    scene.vectra_phase = "working"
+    scene.vectra_status = "Working"
+    scene.vectra_agent_transcript = ""
+    scene.vectra_runtime_state = "valid_action_batch_ready"
+    fake_bpy.context.scene = scene
+    fake_bpy.data.scenes["Scene"] = scene
+
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    sys.modules.pop("vectra.operators.run_task", None)
+    run_task_module = _reload_module("vectra.operators.run_task")
+    run_task_module._agent_loop_state = run_task_module.AgentLoopState(
+        prompt="make a room",
+        execution_mode="vectra-dev",
+        iteration=3,
+        ineffective_turns=2,
+        last_action_families=["layout"],
+    )
+
+    finalized: list[str] = []
+    monkeypatch.setattr(run_task_module, "_finalize_request", lambda: finalized.append("done"))
+
+    result = run_task_module._maybe_continue_agent_loop(
+        scene,
+        {"status": "ok", "continue_loop": True},
+        success=True,
+        execution_payload={"actions": [], "metadata": {"action_families": ["layout"]}},
+        verification={
+            "meaningful_change": False,
+            "structural_progress": False,
+            "low_progress": False,
+            "progress_score": 0.0,
+            "summary": "No scene changes were detected.",
+        },
+    )
+
+    assert result is None
+    assert finalized == ["done"]
+    assert scene.vectra_phase == "error"
+    assert scene.vectra_status == "Stopping after repeated ineffective turns"
