@@ -170,13 +170,15 @@ class BaseProviderAdapter(ABC):
                 max_retries=max_retries,
             )
         except ProviderError as exc:
+            runtime_state = getattr(exc, "runtime_state", "provider_transport_failure")
             attempt = ProviderAttempt(
                 provider=endpoint.provider,
                 model=endpoint.model,
                 transport=endpoint.transport,
-                runtime_state="provider_transport_failure",
+                runtime_state=runtime_state,
                 failure_reason=str(exc),
                 request_metadata=http_request.request_metadata,
+                response_metadata={"error_type": exc.__class__.__name__},
             )
             log_structured(
                 _LOGGER,
@@ -185,7 +187,7 @@ class BaseProviderAdapter(ABC):
                     "provider": endpoint.provider,
                     "model": endpoint.model,
                     "transport": endpoint.transport,
-                    "runtime_state": "provider_transport_failure",
+                    "runtime_state": runtime_state,
                     "failure_reason": str(exc),
                 },
                 level="error",
@@ -305,7 +307,10 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                     level="warning",
                 )
                 if attempt > max_retries:
-                    raise ProviderTimeoutError(str(exc) or "provider request timed out") from exc
+                    raise ProviderTimeoutError(
+                        str(exc) or "provider request timed out",
+                        runtime_state="provider_deadline_exceeded",
+                    ) from exc
             except (httpx.HTTPError, ValueError) as exc:
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
                 error_payload = ""
@@ -329,7 +334,10 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                     level="error",
                 )
                 raise ProviderError(str(exc) or "provider request failed") from exc
-        raise ProviderTimeoutError(str(last_error) if last_error else "provider request timed out")
+        raise ProviderTimeoutError(
+            str(last_error) if last_error else "provider request timed out",
+            runtime_state="provider_deadline_exceeded",
+        )
 
     def execute(
         self,
