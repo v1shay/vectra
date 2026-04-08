@@ -56,6 +56,7 @@ class CreatePrimitiveTool(BaseTool):
         "location": {"type": "vector3", "required": False},
         "scale": {"type": "vector3", "required": False},
         "rotation": {"type": "vector3", "required": False},
+        "rotation_euler": {"type": "vector3", "required": False},
     }
     output_schema = {
         "object_name": {"type": "string"},
@@ -81,8 +82,9 @@ class CreatePrimitiveTool(BaseTool):
         if "scale" in params and params["scale"] is not None:
             scale = validate_vector3(params["scale"], "scale")
         rotation = None
-        if "rotation" in params and params["rotation"] is not None:
-            rotation = validate_vector3(params["rotation"], "rotation")
+        rotation_value = params.get("rotation", params.get("rotation_euler"))
+        if rotation_value is not None:
+            rotation = validate_vector3(rotation_value, "rotation")
 
         return {
             "type": primitive_type,
