@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 DEFAULT_DIRECTOR_TIMEOUT_SECONDS = 45.0
 DEFAULT_DIRECTOR_MAX_RETRIES = 2
+DEFAULT_DIRECTOR_STEP_DEADLINE_SECONDS = 60.0
+DEFAULT_DIRECTOR_PROVIDER_ATTEMPT_BUDGET = 4
 DEFAULT_CONTROLLER_TIMEOUT_SECONDS = 12.0
 DEFAULT_CONTROLLER_MAX_RETRIES = 1
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
@@ -33,6 +35,8 @@ class RuntimeConfig:
     director: EndpointConfig | None
     director_timeout_seconds: float
     director_max_retries: int
+    director_step_deadline_seconds: float
+    director_provider_attempt_budget: int
     controller_timeout_seconds: float
     controller_max_retries: int
     ollama_host: str
@@ -148,6 +152,17 @@ def load_runtime_config() -> RuntimeConfig:
         director_max_retries=_read_int_env(
             "VECTRA_DIRECTOR_MAX_RETRIES",
             _read_int_env("VECTRA_LLM_MAX_RETRIES", DEFAULT_DIRECTOR_MAX_RETRIES),
+        ),
+        director_step_deadline_seconds=_read_float_env(
+            "VECTRA_DIRECTOR_STEP_DEADLINE_SECONDS",
+            DEFAULT_DIRECTOR_STEP_DEADLINE_SECONDS,
+        ),
+        director_provider_attempt_budget=max(
+            _read_int_env(
+                "VECTRA_DIRECTOR_PROVIDER_ATTEMPT_BUDGET",
+                DEFAULT_DIRECTOR_PROVIDER_ATTEMPT_BUDGET,
+            ),
+            1,
         ),
         controller_timeout_seconds=_read_float_env(
             "VECTRA_CONTROLLER_TIMEOUT_SECONDS",
