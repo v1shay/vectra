@@ -149,6 +149,7 @@ def test_addon_runtime_register_unregister_cycle_is_reload_safe(
         "vectra_prompt",
         "vectra_status",
         "vectra_phase",
+        "vectra_runtime_state",
         "vectra_request_in_flight",
         "vectra_execution_mode",
         "vectra_agent_transcript",
@@ -174,6 +175,7 @@ def test_addon_runtime_register_unregister_cycle_is_reload_safe(
         "vectra_prompt",
         "vectra_status",
         "vectra_phase",
+        "vectra_runtime_state",
         "vectra_request_in_flight",
         "vectra_execution_mode",
         "vectra_agent_transcript",
@@ -267,6 +269,51 @@ def test_run_task_marks_empty_error_response_as_error_phase(
     assert scene.vectra_request_in_flight is False
     assert scene.vectra_phase == "error"
     assert scene.vectra_status == "No actions returned: invalid request"
+
+
+def test_agent_result_surfaces_runtime_error_state_in_ui(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bpy = _make_fake_bpy()
+    scene = fake_bpy.types.Scene()
+    scene.name = "Scene"
+    scene.vectra_request_in_flight = True
+    scene.vectra_phase = "working"
+    scene.vectra_status = "Awaiting model response..."
+    scene.vectra_runtime_state = "awaiting_model_response"
+    scene.vectra_agent_transcript = ""
+    scene.vectra_pending_question = ""
+    scene.vectra_history_json = "[]"
+    scene.vectra_iteration = 1
+    fake_bpy.context.scene = scene
+    fake_bpy.data.scenes["Scene"] = scene
+
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    sys.modules.pop("vectra.operators.run_task", None)
+    run_task_module = _reload_module("vectra.operators.run_task")
+    run_task_module._agent_loop_state = run_task_module.AgentLoopState(
+        prompt="make something cool",
+        execution_mode="vectra-dev",
+    )
+
+    result = run_task_module._handle_agent_result(
+        scene,
+        {
+            "status": "error",
+            "message": "Provider transport failed",
+            "narration": "Provider transport failed",
+            "assumptions": [],
+            "metadata": {
+                "runtime_state": "provider_transport_failure",
+                "runtime_state_detail": "Provider transport failed",
+            },
+        },
+    )
+
+    assert result is None
+    assert scene.vectra_phase == "error"
+    assert scene.vectra_status == "Provider transport failed"
+    assert scene.vectra_runtime_state == "provider_transport_failure"
 
 
 def test_bootstrap_register_replaces_stale_preferences_class(

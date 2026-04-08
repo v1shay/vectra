@@ -1,26 +1,25 @@
 from __future__ import annotations
 
 import json
-import time
+from dataclasses import replace
 from typing import Any
-
-import httpx
 
 from vectra.utils.logging import get_vectra_logger, log_structured
 
+from .adapters import (
+    ProviderError,
+    ProviderRequest,
+    ProviderTimeoutError,
+    get_provider_adapter,
+    register_default_provider_adapters,
+    register_provider_adapter,
+    reset_provider_adapters,
+)
 from .config import EndpointConfig, load_runtime_config
-from .models import ControllerDecision, ProviderResult, ToolCall
+from .models import ControllerDecision, ProviderAttempt, ProviderResult, RuntimeState
 from .prompts import controller_system_prompt, director_system_prompt
 
 _LOGGER = get_vectra_logger("vectra.runtime.director.providers")
-
-
-class ProviderError(Exception):
-    """Raised when a provider cannot fulfill a request."""
-
-
-class ProviderTimeoutError(ProviderError):
-    """Raised when a provider times out."""
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -46,267 +45,6 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return {}
 
 
-def _request_with_logging(
-    config: EndpointConfig,
-    *,
-    path: str,
-    payload: dict[str, Any],
-    timeout: float,
-    attempt: int,
-) -> dict[str, Any]:
-    started = time.perf_counter()
-    log_structured(
-        _LOGGER,
-        "llm_request_started",
-        {
-            "provider": config.provider,
-            "model": config.model,
-            "attempt": attempt,
-        },
-    )
-    try:
-        response = httpx.post(
-            f"{config.base_url}{path}",
-            headers={
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        data = response.json()
-    except httpx.TimeoutException as exc:
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        log_structured(
-            _LOGGER,
-            "llm_request_timed_out",
-            {
-                "provider": config.provider,
-                "model": config.model,
-                "attempt": attempt,
-                "elapsed_ms": elapsed_ms,
-            },
-            level="warning",
-        )
-        raise ProviderTimeoutError(str(exc) or "provider request timed out") from exc
-    except (httpx.HTTPError, ValueError) as exc:
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        error_payload = ""
-        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
-            try:
-                error_payload = exc.response.text[:500]
-            except Exception:  # pragma: no cover - defensive logging only
-                error_payload = ""
-        log_structured(
-            _LOGGER,
-            "provider_failure",
-            {
-                "provider": config.provider,
-                "model": config.model,
-                "attempt": attempt,
-                "elapsed_ms": elapsed_ms,
-                "error": str(exc),
-                "error_payload": error_payload,
-            },
-            level="error",
-        )
-        raise ProviderError(str(exc) or "provider request failed") from exc
-
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
-    log_structured(
-        _LOGGER,
-        "llm_request_completed",
-        {
-            "provider": config.provider,
-            "model": config.model,
-            "attempt": attempt,
-            "elapsed_ms": elapsed_ms,
-        },
-    )
-    return data if isinstance(data, dict) else {}
-
-
-def _parse_responses_output(data: dict[str, Any]) -> ProviderResult:
-    assistant_parts: list[str] = []
-    tool_calls: list[ToolCall] = []
-    for item in data.get("output", []):
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type == "message":
-            for content in item.get("content", []):
-                if not isinstance(content, dict):
-                    continue
-                content_type = content.get("type")
-                if content_type in {"output_text", "text"}:
-                    text = content.get("text") or content.get("value") or ""
-                    if isinstance(text, str) and text.strip():
-                        assistant_parts.append(text.strip())
-        elif item_type in {"function_call", "tool_call"}:
-            name = item.get("name")
-            arguments = item.get("arguments")
-            if not isinstance(name, str) or not name.strip():
-                continue
-            if isinstance(arguments, str):
-                parsed_args = _extract_json_object(arguments)
-            elif isinstance(arguments, dict):
-                parsed_args = arguments
-            else:
-                parsed_args = {}
-            tool_calls.append(ToolCall(name=name, arguments=parsed_args))
-        elif item_type == "reasoning":
-            summary = item.get("summary")
-            if isinstance(summary, list):
-                for content in summary:
-                    if isinstance(content, dict):
-                        text = content.get("text")
-                        if isinstance(text, str) and text.strip():
-                            assistant_parts.append(text.strip())
-    output_text = data.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        assistant_parts.append(output_text.strip())
-    return ProviderResult(
-        provider="",
-        model="",
-        assistant_text="\n".join(part for part in assistant_parts if part).strip(),
-        tool_calls=tool_calls,
-        raw_response=data,
-    )
-
-
-def _call_responses_api(
-    config: EndpointConfig,
-    *,
-    instructions: str,
-    user_input: str | list[dict[str, Any]],
-    tools: list[dict[str, Any]],
-    timeout: float,
-    max_retries: int,
-) -> ProviderResult:
-    last_error: Exception | None = None
-    for attempt in range(1, max_retries + 2):
-        try:
-            payload = {
-                "model": config.model,
-                "input": user_input,
-                "instructions": instructions,
-                "tools": tools,
-            }
-            if tools:
-                payload["tool_choice"] = "auto"
-                payload["parallel_tool_calls"] = True
-            data = _request_with_logging(
-                config,
-                path="/responses",
-                payload=payload,
-                timeout=timeout,
-                attempt=attempt,
-            )
-            result = _parse_responses_output(data)
-            return ProviderResult(
-                provider=config.provider,
-                model=config.model,
-                assistant_text=result.assistant_text,
-                tool_calls=result.tool_calls,
-                raw_response=data,
-            )
-        except ProviderTimeoutError as exc:
-            last_error = exc
-            if attempt > max_retries:
-                break
-        except ProviderError as exc:
-            raise exc
-    raise ProviderTimeoutError(str(last_error) if last_error else "provider request timed out")
-
-
-def _call_ollama_generate(
-    *,
-    host: str,
-    model: str,
-    prompt: str,
-    timeout: float,
-    attempt: int,
-) -> ProviderResult:
-    started = time.perf_counter()
-    log_structured(
-        _LOGGER,
-        "llm_request_started",
-        {"provider": "ollama", "model": model, "attempt": attempt},
-    )
-    try:
-        response = httpx.post(
-            f"{host}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except httpx.TimeoutException as exc:
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        log_structured(
-            _LOGGER,
-            "llm_request_timed_out",
-            {"provider": "ollama", "model": model, "attempt": attempt, "elapsed_ms": elapsed_ms},
-            level="warning",
-        )
-        raise ProviderTimeoutError(str(exc) or "ollama request timed out") from exc
-    except (httpx.HTTPError, ValueError) as exc:
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        log_structured(
-            _LOGGER,
-            "provider_failure",
-            {
-                "provider": "ollama",
-                "model": model,
-                "attempt": attempt,
-                "elapsed_ms": elapsed_ms,
-                "error": str(exc),
-            },
-            level="error",
-        )
-        raise ProviderError(str(exc) or "ollama request failed") from exc
-
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
-    log_structured(
-        _LOGGER,
-        "llm_request_completed",
-        {"provider": "ollama", "model": model, "attempt": attempt, "elapsed_ms": elapsed_ms},
-    )
-    response_text = str(payload.get("response", "")).strip()
-    parsed = _extract_json_object(response_text)
-    tool_call = parsed.get("tool_call")
-    tool_calls_value = parsed.get("tool_calls")
-    complete = parsed.get("complete")
-    clarify = parsed.get("clarify")
-    tool_calls: list[ToolCall] = []
-    if isinstance(tool_calls_value, list):
-        for item in tool_calls_value:
-            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
-                continue
-            arguments = item.get("arguments", {})
-            if not isinstance(arguments, dict):
-                arguments = {}
-            tool_calls.append(ToolCall(name=item["name"], arguments=arguments))
-    elif isinstance(tool_call, dict) and isinstance(tool_call.get("name"), str):
-        arguments = tool_call.get("arguments", {})
-        if not isinstance(arguments, dict):
-            arguments = {}
-        tool_calls.append(ToolCall(name=tool_call["name"], arguments=arguments))
-    elif isinstance(complete, dict):
-        tool_calls.append(ToolCall(name="task.complete", arguments=complete))
-    elif isinstance(clarify, dict):
-        tool_calls.append(ToolCall(name="task.clarify", arguments=clarify))
-    return ProviderResult(
-        provider="ollama",
-        model=model,
-        assistant_text=str(parsed.get("assistant_text", "")).strip(),
-        tool_calls=tool_calls,
-        raw_response={"response": response_text},
-        provider_chain=[f"ollama:{model}"],
-    )
-
-
 def build_controller_input(prompt: str, scene_state: dict[str, Any]) -> str:
     object_count = len(scene_state.get("objects", [])) if isinstance(scene_state.get("objects"), list) else 0
     return (
@@ -317,25 +55,162 @@ def build_controller_input(prompt: str, scene_state: dict[str, Any]) -> str:
     )
 
 
+def build_director_input(prompt_text: str) -> str:
+    return prompt_text
+
+
+def _actionability_hint(*, allow_complete: bool) -> str:
+    complete_rule = (
+        "Use task.complete only when the current scene already satisfies the request."
+        if allow_complete
+        else "Do not use task.complete yet. Return the next actionable step instead."
+    )
+    return (
+        "Your previous response was not actionable.\n"
+        "Return exactly one of the following:\n"
+        "1. a tool batch with 1 to 4 tool calls\n"
+        "2. task.clarify with a short question and reason only if execution is truly impossible or unsafe\n"
+        f"3. task.complete only if the current scene is already complete\n"
+        f"{complete_rule}\n"
+        "Do not return narration without actionable output."
+    )
+
+
+def _classify_director_response(
+    *,
+    tool_calls: list[Any],
+    parse_status: str,
+    failure_reason: str,
+    allow_complete: bool,
+) -> tuple[RuntimeState, str]:
+    if parse_status == "tool_call_parse_failure":
+        return "tool_call_parse_failure", failure_reason or "Provider returned malformed tool calls."
+    if parse_status == "no_action_response":
+        return "no_action_response", failure_reason or "Provider returned no actionable tool calls."
+    if not tool_calls:
+        return "no_action_response", "Provider returned no actionable tool calls."
+    first_tool_name = getattr(tool_calls[0], "name", "")
+    if first_tool_name == "task.complete" and not allow_complete:
+        return "no_action_response", "Provider completed before returning a first actionable step."
+    return "valid_action_batch_ready", ""
+
+
+def _finalize_attempt(
+    attempt: ProviderAttempt,
+    *,
+    runtime_state: RuntimeState,
+    failure_reason: str = "",
+) -> ProviderAttempt:
+    response_metadata = dict(attempt.response_metadata)
+    response_metadata["failure_reason"] = failure_reason
+    return replace(
+        attempt,
+        runtime_state=runtime_state,
+        failure_reason=failure_reason,
+        response_metadata=response_metadata,
+    )
+
+
+def _attempts_to_dicts(attempts: list[ProviderAttempt]) -> list[dict[str, Any]]:
+    return [
+        {
+            "provider": attempt.provider,
+            "model": attempt.model,
+            "transport": attempt.transport,
+            "runtime_state": attempt.runtime_state,
+            "response_type": attempt.response_type,
+            "parsed_tool_call_count": attempt.parsed_tool_call_count,
+            "failure_reason": attempt.failure_reason,
+            "request_metadata": attempt.request_metadata,
+            "response_metadata": attempt.response_metadata,
+        }
+        for attempt in attempts
+    ]
+
+
+def _aggregate_failure(attempts: list[ProviderAttempt]) -> tuple[RuntimeState, str]:
+    if not attempts:
+        return "provider_transport_failure", "No configured provider could satisfy the request."
+    last_failure_reason = next(
+        (attempt.failure_reason for attempt in reversed(attempts) if attempt.failure_reason),
+        "No configured provider could satisfy the request.",
+    )
+    last_non_success = next(
+        (
+            attempt.runtime_state
+            for attempt in reversed(attempts)
+            if attempt.runtime_state != "valid_action_batch_ready"
+        ),
+        "provider_transport_failure",
+    )
+    return last_non_success, last_failure_reason
+
+
+def _director_candidates(runtime) -> list[EndpointConfig]:
+    candidates: list[EndpointConfig] = []
+    if runtime.director is not None:
+        candidates.append(runtime.director)
+    if runtime.controller is not None:
+        candidates.append(
+            EndpointConfig(
+                provider="xai-director-fallback",
+                family="xai",
+                base_url=runtime.controller.base_url,
+                api_key=runtime.controller.api_key,
+                model=runtime.controller.model,
+                transport=runtime.controller.transport,
+            )
+        )
+    candidates.append(
+        EndpointConfig(
+            provider="ollama-primary",
+            family="ollama",
+            base_url=runtime.ollama_host,
+            api_key=None,
+            model=runtime.ollama_primary_model,
+            transport="ollama_json_envelope",
+        )
+    )
+    if runtime.ollama_secondary_model != runtime.ollama_primary_model:
+        candidates.append(
+            EndpointConfig(
+                provider="ollama-secondary",
+                family="ollama",
+                base_url=runtime.ollama_host,
+                api_key=None,
+                model=runtime.ollama_secondary_model,
+                transport="ollama_json_envelope",
+            )
+        )
+    return candidates
+
+
 def call_controller(prompt: str, scene_state: dict[str, Any]) -> ControllerDecision:
     runtime = load_runtime_config()
     config = runtime.controller
     if config is None:
         return ControllerDecision()
 
+    register_default_provider_adapters()
     try:
-        result = _call_responses_api(
-            config,
-            instructions=controller_system_prompt(),
-            user_input=build_controller_input(prompt, scene_state),
-            tools=[],
-            timeout=runtime.controller_timeout_seconds,
-            max_retries=runtime.controller_max_retries,
-        )
+        adapter = get_provider_adapter(config)
     except ProviderError:
         return ControllerDecision()
+    request = ProviderRequest(
+        instructions=controller_system_prompt(),
+        user_input=build_controller_input(prompt, scene_state),
+        tools=[],
+    )
+    result = adapter.invoke(
+        config,
+        request,
+        timeout=runtime.controller_timeout_seconds,
+        max_retries=runtime.controller_max_retries,
+    )
+    if result.parsed is None or result.parsed.parse_status != "ok":
+        return ControllerDecision()
 
-    parsed = _extract_json_object(result.assistant_text)
+    parsed = _extract_json_object(result.parsed.assistant_text)
     complexity = parsed.get("complexity")
     if complexity not in {"low", "medium", "high"}:
         complexity = "medium"
@@ -343,78 +218,133 @@ def call_controller(prompt: str, scene_state: dict[str, Any]) -> ControllerDecis
         needs_scene_context=bool(parsed.get("needs_scene_context", True)),
         needs_visual_feedback=bool(parsed.get("needs_visual_feedback", False)),
         complexity=complexity,
-        provider=result.provider,
-        model=result.model,
+        provider=config.provider,
+        model=config.model,
         raw=parsed,
     )
-
-
-def build_director_input(prompt_text: str) -> str:
-    return prompt_text
 
 
 def call_director(
     *,
     prompt_text: str,
     tools: list[dict[str, Any]],
+    allow_complete: bool = False,
 ) -> ProviderResult:
     runtime = load_runtime_config()
-    last_error: Exception | None = None
-    cloud_chain: list[EndpointConfig] = []
-    if runtime.director is not None:
-        cloud_chain.append(runtime.director)
-    if runtime.controller is not None:
-        cloud_chain.append(
-            EndpointConfig(
-                provider="xai-director-fallback",
-                base_url=runtime.controller.base_url,
-                api_key=runtime.controller.api_key,
-                model=runtime.controller.model,
-                transport=runtime.controller.transport,
-            )
-        )
+    attempts: list[ProviderAttempt] = []
+    register_default_provider_adapters()
 
-    for config in cloud_chain:
+    for candidate_index, config in enumerate(_director_candidates(runtime)):
         try:
-            result = _call_responses_api(
-                config,
+            adapter = get_provider_adapter(config)
+        except ProviderError as exc:
+            attempts.append(
+                ProviderAttempt(
+                    provider=config.provider,
+                    model=config.model,
+                    transport=config.transport,
+                    runtime_state="provider_transport_failure",
+                    failure_reason=str(exc),
+                )
+            )
+            continue
+        if candidate_index > 0:
+            log_structured(
+                _LOGGER,
+                "fallback_provider_invoked",
+                {
+                    "provider": config.provider,
+                    "model": config.model,
+                    "transport": config.transport,
+                    "fallback_index": candidate_index,
+                },
+            )
+
+        for corrective_retry in range(2):
+            request = ProviderRequest(
                 instructions=director_system_prompt(),
                 user_input=build_director_input(prompt_text),
                 tools=tools,
+                corrective_hint=_actionability_hint(allow_complete=allow_complete) if corrective_retry else None,
+            )
+            call_result = adapter.invoke(
+                config,
+                request,
                 timeout=runtime.director_timeout_seconds,
                 max_retries=runtime.director_max_retries,
             )
-            return ProviderResult(
-                provider=result.provider,
-                model=result.model,
-                assistant_text=result.assistant_text,
-                tool_calls=result.tool_calls,
-                raw_response=result.raw_response,
-                provider_chain=[f"{config.provider}:{config.model}"],
-            )
-        except ProviderError as exc:
-            last_error = exc
+            attempt = call_result.attempt
+            parsed = call_result.parsed
+            if parsed is None:
+                attempts.append(attempt)
+                break
 
-    ollama_prompt = (
-        f"{director_system_prompt()}\n\n"
-        "Return a JSON object with optional keys assistant_text, tool_calls, tool_call, complete, or clarify.\n"
-        "tool_calls must be an array of up to 4 items that each look like {\"name\": string, \"arguments\": object}.\n"
-        "If you return a single tool call, you may use tool_call instead.\n"
-        f"User context:\n{prompt_text}"
+            runtime_state, failure_reason = _classify_director_response(
+                tool_calls=parsed.tool_calls,
+                parse_status=parsed.parse_status,
+                failure_reason=parsed.failure_reason,
+                allow_complete=allow_complete,
+            )
+            attempts.append(
+                _finalize_attempt(
+                    attempt,
+                    runtime_state=runtime_state,
+                    failure_reason=failure_reason,
+                )
+            )
+            if runtime_state == "valid_action_batch_ready":
+                final_runtime_state: RuntimeState = (
+                    "fallback_provider_invoked" if candidate_index > 0 else "valid_action_batch_ready"
+                )
+                if final_runtime_state != runtime_state:
+                    attempts[-1] = _finalize_attempt(
+                        attempts[-1],
+                        runtime_state=final_runtime_state,
+                        failure_reason="",
+                    )
+                return ProviderResult(
+                    provider=config.provider,
+                    model=config.model,
+                    transport=config.transport,
+                    parsed=parsed,
+                    provider_chain=[f"{attempt.provider}:{attempt.model}" for attempt in attempts],
+                    attempts=attempts,
+                    adapter_capabilities=call_result.capabilities,
+                    runtime_state=final_runtime_state,
+                )
+
+            log_structured(
+                _LOGGER,
+                "non_actionable_response_rejected",
+                {
+                    "provider": config.provider,
+                    "model": config.model,
+                    "transport": config.transport,
+                    "runtime_state": runtime_state,
+                    "failure_reason": failure_reason,
+                    "corrective_retry": bool(corrective_retry),
+                },
+                level="warning",
+            )
+            if corrective_retry == 0:
+                continue
+            break
+
+    runtime_state, failure_reason = _aggregate_failure(attempts)
+    raise ProviderError(
+        failure_reason,
+        runtime_state=runtime_state,
+        attempts=attempts,
     )
-    for attempt, model in enumerate(
-        [runtime.ollama_primary_model, runtime.ollama_secondary_model],
-        start=1,
-    ):
-        try:
-            return _call_ollama_generate(
-                host=runtime.ollama_host,
-                model=model,
-                prompt=ollama_prompt,
-                timeout=runtime.director_timeout_seconds,
-                attempt=attempt,
-            )
-        except ProviderError as exc:
-            last_error = exc
 
-    raise ProviderError(str(last_error) if last_error else "No configured provider could satisfy the request")
+
+__all__ = [
+    "ProviderError",
+    "ProviderTimeoutError",
+    "call_controller",
+    "call_director",
+    "get_provider_adapter",
+    "register_default_provider_adapters",
+    "register_provider_adapter",
+    "reset_provider_adapters",
+]

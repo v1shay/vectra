@@ -27,6 +27,9 @@ class VECTRA_PT_panel(bpy.types.Panel):
 
         layout.label(text=f"Status: {scene.vectra_status}")
         layout.label(text=f"Phase: {scene.vectra_phase}")
+        runtime_state = getattr(scene, "vectra_runtime_state", "")
+        if runtime_state:
+            layout.label(text=f"Runtime State: {runtime_state}")
         if getattr(scene, "vectra_iteration", 0):
             layout.label(text=f"Iteration: {scene.vectra_iteration}")
         pending_question = getattr(scene, "vectra_pending_question", "")

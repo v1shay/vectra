@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from agent_runtime.director.loop import DirectorLoop
-from agent_runtime.director.models import DirectorContext, ProviderResult, ToolCall
+from agent_runtime.director.models import DirectorContext, ParsedProviderResponse, ProviderResult, ToolCall
 from agent_runtime.director.resolver import ReferenceResolver
 
 
@@ -61,11 +61,14 @@ def test_director_loop_records_assumptions_instead_of_failing_on_missing_target(
     )
     monkeypatch.setattr(
         "agent_runtime.director.loop.call_director",
-        lambda prompt_text, tools: ProviderResult(
+        lambda prompt_text, tools, allow_complete=False: ProviderResult(
             provider="openai-director",
             model="gpt-5.1",
-            assistant_text="I'll spread the cubes apart.",
-            tool_calls=[ToolCall(name="object.transform", arguments={"delta": [3.0, 0.0, 0.0]})],
+            parsed=ParsedProviderResponse(
+                assistant_text="I'll spread the cubes apart.",
+                tool_calls=[ToolCall(name="object.transform", arguments={"delta": [3.0, 0.0, 0.0]})],
+                response_type="tool_calls",
+            ),
         ),
     )
 
@@ -91,14 +94,17 @@ def test_director_loop_supports_batched_tool_calls(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "agent_runtime.director.loop.call_director",
-        lambda prompt_text, tools: ProviderResult(
+        lambda prompt_text, tools, allow_complete=False: ProviderResult(
             provider="openai-director",
             model="gpt-5.1",
-            assistant_text="I will create the base scene and add lighting in the same turn.",
-            tool_calls=[
-                ToolCall(name="mesh.create_primitive", arguments={"type": "plane", "name": "Floor"}),
-                ToolCall(name="light.create", arguments={"type": "AREA"}),
-            ],
+            parsed=ParsedProviderResponse(
+                assistant_text="I will create the base scene and add lighting in the same turn.",
+                tool_calls=[
+                    ToolCall(name="mesh.create_primitive", arguments={"type": "plane", "name": "Floor"}),
+                    ToolCall(name="light.create", arguments={"type": "AREA"}),
+                ],
+                response_type="tool_calls",
+            ),
         ),
     )
 
