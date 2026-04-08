@@ -21,6 +21,7 @@ class CreateLightTool(BaseTool):
         "location": {"type": "vector3", "required": False},
         "energy": {"type": "number", "required": False},
         "rotation": {"type": "vector3", "required": False},
+        "rotation_euler": {"type": "vector3", "required": False},
         "target": {"type": "string", "required": False},
     }
 
@@ -34,8 +35,9 @@ class CreateLightTool(BaseTool):
             raise ToolValidationError("'type' must be one of AREA, POINT, SUN, or SPOT")
         if "location" in params and params["location"] is not None:
             normalized["location"] = validate_vector3(params["location"], "location")
-        if "rotation" in params and params["rotation"] is not None:
-            normalized["rotation"] = validate_vector3(params["rotation"], "rotation")
+        rotation_value = params.get("rotation", params.get("rotation_euler"))
+        if rotation_value is not None:
+            normalized["rotation"] = validate_vector3(rotation_value, "rotation")
         if "target" in params:
             normalized["target"] = normalize_optional_string(params["target"], "target")
         return normalized
@@ -74,12 +76,30 @@ class AdjustLightTool(BaseTool):
         "target": {"type": "string", "required": False},
         "location": {"type": "vector3", "required": False},
         "rotation": {"type": "vector3", "required": False},
+        "rotation_euler": {"type": "vector3", "required": False},
         "energy": {"type": "number", "required": False},
     }
+
+    def validate_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = super().validate_params(params)
+        normalized: dict[str, Any] = {}
+        if "target" in params:
+            normalized["target"] = normalize_optional_string(params["target"], "target")
+        if "location" in params and params["location"] is not None:
+            normalized["location"] = validate_vector3(params["location"], "location")
+        rotation_value = params.get("rotation", params.get("rotation_euler"))
+        if rotation_value is not None:
+            normalized["rotation"] = validate_vector3(rotation_value, "rotation")
+        if "energy" in params and params["energy"] is not None:
+            if isinstance(params["energy"], bool):
+                raise ToolValidationError("'energy' must be numeric")
+            normalized["energy"] = float(params["energy"])
+        return normalized
 
     def execute(self, context: Any, params: dict[str, Any]) -> ToolExecutionResult:
         if bpy is None:
             raise ToolExecutionError("Blender Python API is unavailable")
+        params = self.validate_params(params)
         ensure_object_mode(context)
         light_object = resolve_object(context, params.get("target"))
         if light_object is None or getattr(light_object, "type", "") != "LIGHT":
@@ -90,8 +110,6 @@ class AdjustLightTool(BaseTool):
         if params.get("rotation") is not None:
             light_object.rotation_euler = validate_vector3(params["rotation"], "rotation")
         if params.get("energy") is not None:
-            if isinstance(params["energy"], bool):
-                raise ToolValidationError("'energy' must be numeric")
             light_object.data.energy = float(params["energy"])
 
         return ToolExecutionResult(
