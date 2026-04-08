@@ -28,6 +28,8 @@ class LLMTimeoutError(LLMRequestError):
 class LLMRuntimeSettings:
     director_timeout_seconds: float
     director_max_retries: int
+    director_step_deadline_seconds: float
+    director_provider_attempt_budget: int
     controller_timeout_seconds: float
     controller_max_retries: int
     ollama_host: str
@@ -40,6 +42,8 @@ def read_runtime_settings() -> LLMRuntimeSettings:
     return LLMRuntimeSettings(
         director_timeout_seconds=runtime.director_timeout_seconds,
         director_max_retries=runtime.director_max_retries,
+        director_step_deadline_seconds=runtime.director_step_deadline_seconds,
+        director_provider_attempt_budget=runtime.director_provider_attempt_budget,
         controller_timeout_seconds=runtime.controller_timeout_seconds,
         controller_max_retries=runtime.controller_max_retries,
         ollama_host=runtime.ollama_host,
