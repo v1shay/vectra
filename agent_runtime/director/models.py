@@ -10,7 +10,9 @@ ComplexityLevel = Literal["low", "medium", "high"]
 RuntimeState = Literal[
     "awaiting_model_response",
     "provider_transport_failure",
+    "provider_deadline_exceeded",
     "tool_call_parse_failure",
+    "tool_validation_failure",
     "no_action_response",
     "valid_action_batch_ready",
     "fallback_provider_invoked",
@@ -42,6 +44,12 @@ class AssumptionRecord:
 
 
 @dataclass(frozen=True)
+class ToolCallValidationIssue:
+    tool_name: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class ObservationSummary:
     summary: str
     created_objects: list[str] = field(default_factory=list)
@@ -50,6 +58,9 @@ class ObservationSummary:
     changed_objects: list[str] = field(default_factory=list)
     screenshot_available: bool = False
     meaningful_change: bool = False
+    progress_score: float = 0.0
+    progress_reasons: list[str] = field(default_factory=list)
+    visible_animation: bool = False
 
 
 @dataclass(frozen=True)
