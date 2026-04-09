@@ -34,7 +34,7 @@ def test_reference_resolver_uses_active_object_for_vague_pronouns() -> None:
     assert result.assumptions[0].reason.startswith("Used the active object")
 
 
-def test_reference_resolver_grounds_new_primitives_against_existing_geometry() -> None:
+def test_reference_resolver_grounds_new_primitives_from_scene_footprint() -> None:
     resolver = ReferenceResolver(
         _context(
             {
@@ -52,7 +52,28 @@ def test_reference_resolver_grounds_new_primitives_against_existing_geometry() -
     result = resolver.resolve_location("mesh.create_primitive", None, primitive_type="cube")
 
     assert result.value == [5.0, 0.0, 1.0]
-    assert result.metadata["anchor"] == "Cube_2"
+    assert result.metadata["anchor"] == "scene_footprint"
+
+
+def test_reference_resolver_does_not_chain_new_primitive_to_active_object() -> None:
+    resolver = ReferenceResolver(
+        _context(
+            {
+                "active_object": "Cube_1",
+                "selected_objects": ["Cube_1"],
+                "objects": [
+                    {"name": "Floor", "type": "MESH", "location": [0.0, 0.0, 0.0], "dimensions": [12.0, 12.0, 0.0]},
+                    {"name": "Cube_1", "type": "MESH", "location": [0.0, 0.0, 1.0], "dimensions": [2.0, 2.0, 2.0]},
+                    {"name": "FarWall", "type": "MESH", "location": [6.0, 0.0, 2.0], "dimensions": [0.2, 8.0, 4.0]},
+                ],
+            }
+        )
+    )
+
+    result = resolver.resolve_location("mesh.create_primitive", None, primitive_type="cube")
+
+    assert result.value == [7.1, 0.0, 1.0]
+    assert result.metadata["anchor"] == "scene_footprint"
 
 
 def test_director_loop_records_assumptions_instead_of_failing_on_missing_target(monkeypatch) -> None:

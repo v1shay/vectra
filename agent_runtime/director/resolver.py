@@ -8,7 +8,6 @@ from vectra.tools.spatial import (
     find_floor_object,
     is_floor_like,
     object_type,
-    place_against_location,
     place_on_surface_location,
     primitive_bounds,
     world_bounds,
@@ -252,38 +251,12 @@ class ReferenceResolver:
             return self._scene_map.get(self._floor_name)
         return None
 
-    def _preferred_anchor_target(self) -> dict[str, Any] | None:
-        candidate_names: list[str] = []
-        active_object = _active_object_name(self.context.scene_state)
-        if active_object:
-            candidate_names.append(active_object)
-        candidate_names.extend(_selected_object_names(self.context.scene_state))
-        candidate_names.extend(_history_last_objects(self.context.history))
-
-        seen: set[str] = set()
-        for candidate_name in candidate_names:
-            if candidate_name in seen:
-                continue
-            seen.add(candidate_name)
-            candidate = self._scene_map.get(candidate_name)
-            if candidate is None or object_type(candidate) != "MESH" or is_floor_like(candidate):
-                continue
-            return candidate
-
-        non_floor_mesh_objects = [
+    def _non_floor_mesh_objects(self) -> list[dict[str, Any]]:
+        return [
             obj
             for obj in self._mesh_objects
             if not is_floor_like(obj)
         ]
-        if not non_floor_mesh_objects:
-            return None
-        return sorted(
-            non_floor_mesh_objects,
-            key=lambda obj: (
-                float(world_bounds(obj)["max"][0]),
-                str(obj.get("name", "")).lower(),
-            ),
-        )[-1]
 
     def _grounded_primitive_location(
         self,
@@ -299,40 +272,32 @@ class ReferenceResolver:
         )
         target_half_extents = bounds_half_extents(target_bounds)
         floor_record = self._floor_record()
-        anchor_object = self._preferred_anchor_target()
+        non_floor_mesh_objects = self._non_floor_mesh_objects()
 
-        if anchor_object is not None:
-            anchor_name = str(anchor_object.get("name", "")).strip()
-            guessed = list(
-                place_against_location(
-                    target_bounds,
-                    world_bounds(anchor_object),
-                    side="right",
-                    offset=0.0,
-                )
-            )
+        if non_floor_mesh_objects:
+            structure_bounds = [world_bounds(obj) for obj in non_floor_mesh_objects]
+            min_y = min(float(bounds["min"][1]) for bounds in structure_bounds)
+            max_y = max(float(bounds["max"][1]) for bounds in structure_bounds)
+            max_x = max(float(bounds["max"][0]) for bounds in structure_bounds)
+            guessed = [
+                max_x + target_half_extents[0],
+                (min_y + max_y) / 2.0,
+                target_half_extents[2],
+            ]
             if floor_record is not None:
                 floor_bounds = world_bounds(floor_record)
                 guessed[2] = float(floor_bounds["max"][2]) + target_half_extents[2]
-                assumptions.append(
-                    AssumptionRecord(
-                        key="location",
-                        value=[float(component) for component in guessed],
-                        reason=f"Placed the new object against '{anchor_name}' and grounded it to the floor '{self._floor_name}'.",
-                    )
-                )
-                metadata["anchor"] = anchor_name
-                return ResolutionResult(guessed, assumptions, metadata)
-
-            guessed[2] = target_half_extents[2]
             assumptions.append(
                 AssumptionRecord(
                     key="location",
                     value=[float(component) for component in guessed],
-                    reason=f"Placed the new object against '{anchor_name}' and grounded it to z=0.",
+                    reason=(
+                        f"Placed the new object from the current scene footprint"
+                        + (f" and grounded it to the floor '{self._floor_name}'." if floor_record is not None else " and grounded it to z=0.")
+                    ),
                 )
             )
-            metadata["anchor"] = anchor_name
+            metadata["anchor"] = "scene_footprint"
             return ResolutionResult(guessed, assumptions, metadata)
 
         if floor_record is not None:
