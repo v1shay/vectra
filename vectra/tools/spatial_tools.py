@@ -37,6 +37,15 @@ def _resolved_bounds_payload(obj: Any) -> dict[str, list[float]]:
     }
 
 
+def _update_view_layer(context: Any) -> None:
+    view_layer = getattr(context, "view_layer", None)
+    if view_layer is None and bpy is not None:
+        view_layer = getattr(getattr(bpy, "context", None), "view_layer", None)
+    update = getattr(view_layer, "update", None)
+    if callable(update):
+        update()
+
+
 def _placement_result(
     *,
     target: Any,
@@ -110,6 +119,7 @@ class PlaceOnSurfaceTool(BaseTool):
             offset=float(validated["offset"]),
         )
         target.location = location
+        _update_view_layer(context)
         return _placement_result(
             target=target,
             reference=reference,
@@ -159,6 +169,7 @@ class PlaceAgainstTool(BaseTool):
             offset=float(validated["offset"]),
         )
         target.location = location
+        _update_view_layer(context)
         return _placement_result(
             target=target,
             reference=reference,
@@ -208,6 +219,7 @@ class PlaceRelativeTool(BaseTool):
             distance=float(validated["distance"]),
         )
         target.location = location
+        _update_view_layer(context)
         return _placement_result(
             target=target,
             reference=reference,
@@ -253,6 +265,7 @@ class AlignToTool(BaseTool):
             axis=validated["axis"],
         )
         target.location = location
+        _update_view_layer(context)
         return _placement_result(
             target=target,
             reference=reference,
