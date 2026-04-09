@@ -120,6 +120,8 @@ def _tool_family(tool_name: str) -> str:
         return "create"
     if tool_name.startswith("object.transform"):
         return "transform"
+    if tool_name.startswith("object.place_") or tool_name == "object.align_to":
+        return "layout"
     if tool_name.startswith("object.duplicate"):
         return "duplicate"
     if tool_name.startswith("object.delete"):
@@ -127,6 +129,8 @@ def _tool_family(tool_name: str) -> str:
     if tool_name.startswith("object.distribute") or tool_name.startswith("object.align"):
         return "layout"
     if tool_name.startswith("object.parent") or tool_name.startswith("scene.group"):
+        return "structure"
+    if tool_name == "scene.ensure_floor":
         return "structure"
     if tool_name.startswith("material."):
         return "material"
@@ -544,7 +548,12 @@ class DirectorLoop:
 
         if tool_call.name == "mesh.create_primitive":
             primitive_type = args.get("type", args.get("primitive_type", "cube"))
-            resolved_location = resolver.resolve_location("mesh.create_primitive", args.get("location"))
+            resolved_location = resolver.resolve_location(
+                "mesh.create_primitive",
+                args.get("location"),
+                primitive_type=str(primitive_type),
+                scale=args.get("scale"),
+            )
             assumptions.extend(resolved_location.assumptions)
             metadata["reference_anchor"] = resolved_location.metadata.get("anchor")
             return (
@@ -599,6 +608,22 @@ class DirectorLoop:
                         ),
                     }
                 ],
+                assumptions,
+                metadata,
+                None,
+            )
+
+        if tool_call.name in {"object.place_on_surface", "object.place_against", "object.place_relative", "object.align_to"}:
+            target_result = resolver.resolve_target(args.get("target"))
+            reference_result = resolver.resolve_target(args.get("reference"))
+            assumptions.extend(target_result.assumptions)
+            assumptions.extend(reference_result.assumptions)
+            metadata["reference_anchor"] = reference_result.metadata.get("anchor") or target_result.metadata.get("anchor")
+            params = dict(args)
+            params["target"] = target_result.value
+            params["reference"] = reference_result.value
+            return (
+                [{"action_id": action_id, "tool": tool_call.name, "params": _drop_none_values(params)}],
                 assumptions,
                 metadata,
                 None,
