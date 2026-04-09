@@ -43,6 +43,7 @@ def director_system_prompt() -> str:
         "- Tool batches may contain 2 to 4 tool calls when that improves progress.\n"
         "- Use bulk operations when they can replace repeated micro-actions.\n"
         "- When batching multiple tool calls, earlier calls are assigned action ids step_1, step_2, step_3, and step_4. Later tool arguments may refer to earlier outputs using refs like {\"$ref\": \"step_1.object_name\"}.\n"
+        "- When a later placement step needs a newly created object in the same batch, prefer giving the object a stable name and reusing that name.\n"
         "- If the run is near budget, prioritize a coherent finish over extra refinement.\n"
         "Composition policy:\n"
         "- Build composite objects with multiple intentional parts, alignment, spacing, and proportion.\n"
