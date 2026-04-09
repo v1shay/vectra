@@ -22,6 +22,19 @@ def _mesh(name: str, *, location: tuple[float, float, float], dimensions: tuple[
     )
 
 
+class _CornerVector:
+    def __init__(self, coords: tuple[float, float, float]) -> None:
+        self._coords = coords
+
+    def __iter__(self):
+        return iter(self._coords)
+
+
+class _IdentityMatrix:
+    def __matmul__(self, other):
+        return tuple(other)
+
+
 def test_world_bounds_face_center_and_lowest_z_are_deterministic() -> None:
     cube = {
         "name": "Cube",
@@ -38,6 +51,30 @@ def test_world_bounds_face_center_and_lowest_z_are_deterministic() -> None:
     }
     assert face_center(bounds, "top") == (2.0, 3.0, 2.0)
     assert lowest_z(cube) == 0.0
+
+
+def test_world_bounds_accepts_iterable_blender_style_bound_box_corners() -> None:
+    obj = SimpleNamespace(
+        bound_box=[
+            _CornerVector((-1.0, -1.0, -1.0)),
+            _CornerVector((-1.0, -1.0, 1.0)),
+            _CornerVector((-1.0, 1.0, -1.0)),
+            _CornerVector((-1.0, 1.0, 1.0)),
+            _CornerVector((1.0, -1.0, -1.0)),
+            _CornerVector((1.0, -1.0, 1.0)),
+            _CornerVector((1.0, 1.0, -1.0)),
+            _CornerVector((1.0, 1.0, 1.0)),
+        ],
+        matrix_world=_IdentityMatrix(),
+        location=(0.0, 0.0, 0.0),
+        dimensions=(2.0, 2.0, 2.0),
+        type="MESH",
+    )
+
+    assert world_bounds(obj) == {
+        "min": (-1.0, -1.0, -1.0),
+        "max": (1.0, 1.0, 1.0),
+    }
 
 
 def test_tool_registry_discovers_spatial_phase_a_tools() -> None:
