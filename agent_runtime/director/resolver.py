@@ -3,6 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from vectra.tools.spatial import (
+    bounds_half_extents,
+    find_floor_object,
+    is_floor_like,
+    object_type,
+    place_against_location,
+    place_on_surface_location,
+    primitive_bounds,
+    world_bounds,
+)
+
 from .models import AssumptionRecord, DirectorContext
 
 _VAGUE_REFERENCES = {
@@ -33,6 +44,14 @@ def _object_by_name(scene_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
         for obj in _scene_objects(scene_state)
         if isinstance(obj.get("name"), str)
     }
+
+
+def _mesh_objects(scene_state: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        obj
+        for obj in _scene_objects(scene_state)
+        if object_type(obj) == "MESH"
+    ]
 
 
 def _group_by_name(scene_state: dict[str, Any]) -> dict[str, list[str]]:
@@ -140,6 +159,9 @@ class ReferenceResolver:
         self.context = context
         self._scene_map = _object_by_name(context.scene_state)
         self._group_map = _group_by_name(context.scene_state)
+        self._mesh_objects = _mesh_objects(context.scene_state)
+        floor_candidate = find_floor_object(self._mesh_objects)
+        self._floor_name = str(floor_candidate.get("name", "")).strip() if isinstance(floor_candidate, dict) else None
 
     def resolve_target(self, raw_target: Any) -> ResolutionResult:
         assumptions: list[AssumptionRecord] = []
@@ -225,13 +247,140 @@ class ReferenceResolver:
             {"anchor": "none"},
         )
 
-    def resolve_location(self, tool_name: str, raw_location: Any, *, target_name: str | None = None) -> ResolutionResult:
+    def _floor_record(self) -> dict[str, Any] | None:
+        if self._floor_name:
+            return self._scene_map.get(self._floor_name)
+        return None
+
+    def _preferred_anchor_target(self) -> dict[str, Any] | None:
+        candidate_names: list[str] = []
+        active_object = _active_object_name(self.context.scene_state)
+        if active_object:
+            candidate_names.append(active_object)
+        candidate_names.extend(_selected_object_names(self.context.scene_state))
+        candidate_names.extend(_history_last_objects(self.context.history))
+
+        seen: set[str] = set()
+        for candidate_name in candidate_names:
+            if candidate_name in seen:
+                continue
+            seen.add(candidate_name)
+            candidate = self._scene_map.get(candidate_name)
+            if candidate is None or object_type(candidate) != "MESH" or is_floor_like(candidate):
+                continue
+            return candidate
+
+        non_floor_mesh_objects = [
+            obj
+            for obj in self._mesh_objects
+            if not is_floor_like(obj)
+        ]
+        if not non_floor_mesh_objects:
+            return None
+        return sorted(
+            non_floor_mesh_objects,
+            key=lambda obj: (
+                float(world_bounds(obj)["max"][0]),
+                str(obj.get("name", "")).lower(),
+            ),
+        )[-1]
+
+    def _grounded_primitive_location(
+        self,
+        primitive_type: str,
+        *,
+        scale: Any = None,
+    ) -> ResolutionResult:
+        assumptions: list[AssumptionRecord] = []
+        metadata: dict[str, Any] = {}
+        target_bounds = primitive_bounds(
+            primitive_type,
+            scale=_vector3(scale) if scale is not None else None,
+        )
+        target_half_extents = bounds_half_extents(target_bounds)
+        floor_record = self._floor_record()
+        anchor_object = self._preferred_anchor_target()
+
+        if anchor_object is not None:
+            anchor_name = str(anchor_object.get("name", "")).strip()
+            guessed = list(
+                place_against_location(
+                    target_bounds,
+                    world_bounds(anchor_object),
+                    side="right",
+                    offset=0.0,
+                )
+            )
+            if floor_record is not None:
+                floor_bounds = world_bounds(floor_record)
+                guessed[2] = float(floor_bounds["max"][2]) + target_half_extents[2]
+                assumptions.append(
+                    AssumptionRecord(
+                        key="location",
+                        value=[float(component) for component in guessed],
+                        reason=f"Placed the new object against '{anchor_name}' and grounded it to the floor '{self._floor_name}'.",
+                    )
+                )
+                metadata["anchor"] = anchor_name
+                return ResolutionResult(guessed, assumptions, metadata)
+
+            guessed[2] = target_half_extents[2]
+            assumptions.append(
+                AssumptionRecord(
+                    key="location",
+                    value=[float(component) for component in guessed],
+                    reason=f"Placed the new object against '{anchor_name}' and grounded it to z=0.",
+                )
+            )
+            metadata["anchor"] = anchor_name
+            return ResolutionResult(guessed, assumptions, metadata)
+
+        if floor_record is not None:
+            guessed = place_on_surface_location(
+                target_bounds,
+                world_bounds(floor_record),
+                surface="top",
+                offset=0.0,
+            )
+            assumptions.append(
+                AssumptionRecord(
+                    key="location",
+                    value=[float(component) for component in guessed],
+                    reason=f"Placed the new object on the floor '{self._floor_name}' instead of guessing a raw coordinate.",
+                )
+            )
+            metadata["anchor"] = self._floor_name or "floor"
+            return ResolutionResult(list(guessed), assumptions, metadata)
+
+        guessed = [0.0, 0.0, target_half_extents[2]]
+        assumptions.append(
+            AssumptionRecord(
+                key="location",
+                value=guessed,
+                reason="Used grounded bootstrap placement at z=0 for the first geometric object.",
+            )
+        )
+        metadata["anchor"] = "bootstrap_ground"
+        return ResolutionResult(guessed, assumptions, metadata)
+
+    def resolve_location(
+        self,
+        tool_name: str,
+        raw_location: Any,
+        *,
+        target_name: str | None = None,
+        primitive_type: str | None = None,
+        scale: Any = None,
+    ) -> ResolutionResult:
         assumptions: list[AssumptionRecord] = []
         metadata: dict[str, Any] = {}
         location = _vector3(raw_location)
         if location is not None:
             metadata["anchor"] = "explicit"
             return ResolutionResult(location, assumptions, metadata)
+
+        if tool_name == "mesh.create_primitive":
+            return self._grounded_primitive_location(primitive_type or "cube", scale=scale)
 
         if target_name and target_name in self._scene_map:
             target = self._scene_map[target_name]
