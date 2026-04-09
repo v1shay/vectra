@@ -33,8 +33,13 @@ _DEFAULT_PRIMITIVE_EXTENTS = {
 
 
 def _coerce_vector3(value: Any, *, default: tuple[float, float, float] | None = None) -> tuple[float, float, float]:
-    if isinstance(value, (list, tuple)) and len(value) == 3:
-        return (float(value[0]), float(value[1]), float(value[2]))
+    if not isinstance(value, (str, bytes, bytearray)):
+        try:
+            components = list(value)
+        except TypeError:
+            components = None
+        if components is not None and len(components) == 3:
+            return (float(components[0]), float(components[1]), float(components[2]))
     if default is None:
         raise ValueError("Expected a 3-item vector")
     return default
