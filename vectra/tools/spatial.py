@@ -15,6 +15,7 @@ _FACE_AXES = {
 _RELATION_TO_FACE = {
     "left_of": "left",
     "right_of": "right",
+    "next_to": "right",
     "behind": "back",
     "in_front_of": "front",
     "above": "top",
