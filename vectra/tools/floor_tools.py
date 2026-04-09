@@ -19,6 +19,15 @@ def _active_object() -> Any:
     return getattr(getattr(bpy, "context", None), "active_object", None)
 
 
+def _update_view_layer(context: Any) -> None:
+    view_layer = getattr(context, "view_layer", None)
+    if view_layer is None and bpy is not None:
+        view_layer = getattr(getattr(bpy, "context", None), "view_layer", None)
+    update = getattr(view_layer, "update", None)
+    if callable(update):
+        update()
+
+
 def _resolved_bounds_payload(obj: Any) -> dict[str, list[float]]:
     bounds = world_bounds(obj)
     return {
@@ -72,6 +81,7 @@ class EnsureFloorTool(BaseTool):
         floor_object = find_floor_object(mesh_objects)
         if floor_object is not None:
             floor_object.location = _normalized_floor_location(floor_object)
+            _update_view_layer(context)
             return ToolExecutionResult(
                 outputs={
                     "object_name": floor_object.name,
@@ -95,6 +105,7 @@ class EnsureFloorTool(BaseTool):
         floor_object.name = "Floor"
         floor_object.scale = _scene_floor_scale(mesh_objects)
         floor_object.location = _normalized_floor_location(floor_object)
+        _update_view_layer(context)
 
         return ToolExecutionResult(
             outputs={
