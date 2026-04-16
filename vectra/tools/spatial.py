@@ -298,13 +298,24 @@ def place_against_location(
     *,
     side: str,
     offset: float = 0.0,
+    current_location: Any = None,
 ) -> tuple[float, float, float]:
-    return place_on_surface_location(
+    location = list(place_on_surface_location(
         target_bounds,
         reference_bounds,
         surface=side,
         offset=offset,
-    )
+    ))
+    if current_location is None:
+        return (location[0], location[1], location[2])
+
+    normalized_side = str(side).strip().lower()
+    axis_index, _ = _FACE_AXES[normalized_side]
+    current = _coerce_vector3(current_location)
+    for index in range(3):
+        if index != axis_index:
+            location[index] = current[index]
+    return (location[0], location[1], location[2])
 
 
 def place_relative_location(
@@ -313,16 +324,21 @@ def place_relative_location(
     *,
     relation: str,
     distance: float,
+    current_location: Any = None,
 ) -> tuple[float, float, float]:
     normalized_relation = str(relation).strip().lower()
     if normalized_relation not in _RELATION_TO_FACE:
         raise ValueError(f"Unsupported relation '{relation}'")
-    return place_on_surface_location(
+    location = list(place_on_surface_location(
         target_bounds,
         reference_bounds,
         surface=_RELATION_TO_FACE[normalized_relation],
         offset=float(distance),
-    )
+    ))
+    if current_location is not None and normalized_relation in {"left_of", "right_of", "next_to", "behind", "in_front_of"}:
+        current = _coerce_vector3(current_location)
+        location[2] = current[2]
+    return (location[0], location[1], location[2])
 
 
 def align_to_location(
