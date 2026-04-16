@@ -6,7 +6,6 @@ from typing import Any
 from vectra.tools.spatial import (
     bounds_half_extents,
     find_floor_object,
-    is_floor_like,
     object_type,
     place_on_surface_location,
     primitive_bounds,
@@ -246,17 +245,53 @@ class ReferenceResolver:
             {"anchor": "none"},
         )
 
+    def resolve_required_target(self, raw_target: Any, field_name: str) -> ResolutionResult:
+        assumptions: list[AssumptionRecord] = []
+        metadata: dict[str, Any] = {}
+        if isinstance(raw_target, str) and raw_target.strip():
+            stripped = raw_target.strip()
+            exact = self._scene_map.get(stripped)
+            if exact is not None:
+                metadata["anchor"] = stripped
+                return ResolutionResult(stripped, assumptions, metadata)
+            if stripped in self._group_map:
+                assumptions.append(
+                    AssumptionRecord(
+                        key=field_name,
+                        value=self._group_map[stripped][0],
+                        reason=f"Resolved group '{stripped}' to its first object for a required spatial relation target.",
+                    )
+                )
+                metadata["anchor"] = stripped
+                return ResolutionResult(self._group_map[stripped][0], assumptions, metadata)
+
+            lowered = stripped.lower()
+            if lowered not in _VAGUE_REFERENCES:
+                for name in self._scene_map:
+                    if lowered == name.lower() or lowered in name.lower():
+                        assumptions.append(
+                            AssumptionRecord(
+                                key=field_name,
+                                value=name,
+                                reason=f"Resolved required spatial relation reference '{stripped}' to the closest matching object.",
+                            )
+                        )
+                        metadata["anchor"] = name
+                        return ResolutionResult(name, assumptions, metadata)
+
+        assumptions.append(
+            AssumptionRecord(
+                key=field_name,
+                value=None,
+                reason=f"Spatial relation field '{field_name}' requires an explicit resolvable object; no fallback target was used.",
+            )
+        )
+        return ResolutionResult(None, assumptions, {"anchor": "unresolved_required"})
+
     def _floor_record(self) -> dict[str, Any] | None:
         if self._floor_name:
             return self._scene_map.get(self._floor_name)
         return None
-
-    def _non_floor_mesh_objects(self) -> list[dict[str, Any]]:
-        return [
-            obj
-            for obj in self._mesh_objects
-            if not is_floor_like(obj)
-        ]
 
     def _grounded_primitive_location(
         self,
@@ -272,33 +307,6 @@ class ReferenceResolver:
         )
         target_half_extents = bounds_half_extents(target_bounds)
         floor_record = self._floor_record()
-        non_floor_mesh_objects = self._non_floor_mesh_objects()
-
-        if non_floor_mesh_objects:
-            structure_bounds = [world_bounds(obj) for obj in non_floor_mesh_objects]
-            min_y = min(float(bounds["min"][1]) for bounds in structure_bounds)
-            max_y = max(float(bounds["max"][1]) for bounds in structure_bounds)
-            max_x = max(float(bounds["max"][0]) for bounds in structure_bounds)
-            guessed = [
-                max_x + target_half_extents[0],
-                (min_y + max_y) / 2.0,
-                target_half_extents[2],
-            ]
-            if floor_record is not None:
-                floor_bounds = world_bounds(floor_record)
-                guessed[2] = float(floor_bounds["max"][2]) + target_half_extents[2]
-            assumptions.append(
-                AssumptionRecord(
-                    key="location",
-                    value=[float(component) for component in guessed],
-                    reason=(
-                        f"Placed the new object from the current scene footprint"
-                        + (f" and grounded it to the floor '{self._floor_name}'." if floor_record is not None else " and grounded it to z=0.")
-                    ),
-                )
-            )
-            metadata["anchor"] = "scene_footprint"
-            return ResolutionResult(guessed, assumptions, metadata)
 
         if floor_record is not None:
             guessed = place_on_surface_location(
@@ -316,6 +324,19 @@ class ReferenceResolver:
             )
             metadata["anchor"] = self._floor_name or "floor"
             return ResolutionResult(list(guessed), assumptions, metadata)
+
+        if self._mesh_objects:
+            centroid = _scene_centroid(self.context.scene_state)
+            guessed = [centroid[0], centroid[1], target_half_extents[2]]
+            assumptions.append(
+                AssumptionRecord(
+                    key="location",
+                    value=guessed,
+                    reason="No floor anchor was available, so used the scene centroid with grounded Z instead of scene-footprint or world-origin placement.",
+                )
+            )
+            metadata["anchor"] = "scene_centroid_no_floor"
+            return ResolutionResult(guessed, assumptions, metadata)
 
         guessed = [0.0, 0.0, target_half_extents[2]]
         assumptions.append(

@@ -158,15 +158,32 @@ def _compact_scene_state(scene_state: dict[str, Any]) -> str:
         for obj in objects[:24]:
             if not isinstance(obj, dict):
                 continue
+            spatial = obj.get("spatial", {}) if isinstance(obj.get("spatial"), dict) else {}
+            relations = obj.get("relations", []) if isinstance(obj.get("relations"), list) else []
+            relation_text = ", ".join(
+                f"{item.get('relation')}:{item.get('target')}"
+                for item in relations[:6]
+                if isinstance(item, dict)
+            )
             compact_objects.append(
                 "name={name} type={type} active={active} selected={selected} "
-                "location={location} dimensions={dimensions} parent={parent} materials={materials} animation={animation}".format(
+                "location={location} dimensions={dimensions} bounds={bounds} "
+                "spatial_center={spatial_center} grounded={grounded} floor_contact={floor_contact} "
+                "wall_like={wall_like} floor_like={floor_like} relations={relations} "
+                "parent={parent} materials={materials} animation={animation}".format(
                     name=obj.get("name"),
                     type=obj.get("type"),
                     active=obj.get("active", False),
                     selected=obj.get("selected", False),
                     location=obj.get("location"),
                     dimensions=obj.get("dimensions"),
+                    bounds=obj.get("bounds"),
+                    spatial_center=spatial.get("center"),
+                    grounded=spatial.get("grounded"),
+                    floor_contact=spatial.get("floor_contact"),
+                    wall_like=spatial.get("is_wall_like"),
+                    floor_like=spatial.get("is_floor_like"),
+                    relations=relation_text or "none",
                     parent=obj.get("parent"),
                     materials=obj.get("material_names", []),
                     animation=obj.get("keyframe_count", 0),
@@ -614,8 +631,8 @@ class DirectorLoop:
             )
 
         if tool_call.name in {"object.place_on_surface", "object.place_against", "object.place_relative", "object.align_to"}:
-            target_result = resolver.resolve_target(args.get("target"))
-            reference_result = resolver.resolve_target(args.get("reference"))
+            target_result = resolver.resolve_required_target(args.get("target"), "target")
+            reference_result = resolver.resolve_required_target(args.get("reference"), "reference")
             assumptions.extend(target_result.assumptions)
             assumptions.extend(reference_result.assumptions)
             metadata["reference_anchor"] = reference_result.metadata.get("anchor") or target_result.metadata.get("anchor")
