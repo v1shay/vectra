@@ -30,6 +30,9 @@ _DEFAULT_PRIMITIVE_EXTENTS = {
     "torus": (2.0, 2.0, 0.5),
     "uv_sphere": (2.0, 2.0, 2.0),
 }
+_CONTACT_TOLERANCE = 0.05
+_NEAR_TOLERANCE = 1.0
+_FACE_NAMES = ("left", "right", "back", "front", "bottom", "top")
 
 
 def _coerce_vector3(value: Any, *, default: tuple[float, float, float] | None = None) -> tuple[float, float, float]:
@@ -178,6 +181,95 @@ def face_center(bounds: Mapping[str, Any], face: str) -> tuple[float, float, flo
     return (center[0], center[1], center[2])
 
 
+def all_face_centers(bounds: Mapping[str, Any]) -> dict[str, tuple[float, float, float]]:
+    return {face: face_center(bounds, face) for face in _FACE_NAMES}
+
+
+def bounds_to_lists(bounds: Mapping[str, Any]) -> dict[str, list[float]]:
+    minimum = _coerce_vector3(bounds.get("min"))
+    maximum = _coerce_vector3(bounds.get("max"))
+    return {
+        "min": [float(component) for component in minimum],
+        "max": [float(component) for component in maximum],
+    }
+
+
+def vector_to_list(vector: Any) -> list[float]:
+    coerced = _coerce_vector3(vector)
+    return [float(component) for component in coerced]
+
+
+def face_centers_to_lists(bounds: Mapping[str, Any]) -> dict[str, list[float]]:
+    return {face: vector_to_list(center) for face, center in all_face_centers(bounds).items()}
+
+
+def interval_gap(
+    first_min: float,
+    first_max: float,
+    second_min: float,
+    second_max: float,
+) -> float:
+    if first_max < second_min:
+        return float(second_min - first_max)
+    if second_max < first_min:
+        return float(first_min - second_max)
+    overlap = min(first_max, second_max) - max(first_min, second_min)
+    return -float(overlap)
+
+
+def bounds_axis_gap(
+    first_bounds: Mapping[str, Any],
+    second_bounds: Mapping[str, Any],
+    *,
+    axis: int,
+) -> float:
+    first_minimum = _coerce_vector3(first_bounds.get("min"))
+    first_maximum = _coerce_vector3(first_bounds.get("max"))
+    second_minimum = _coerce_vector3(second_bounds.get("min"))
+    second_maximum = _coerce_vector3(second_bounds.get("max"))
+    return interval_gap(
+        first_minimum[axis],
+        first_maximum[axis],
+        second_minimum[axis],
+        second_maximum[axis],
+    )
+
+
+def bounds_overlap_on_axes(
+    first_bounds: Mapping[str, Any],
+    second_bounds: Mapping[str, Any],
+    axes: Iterable[int],
+    *,
+    tolerance: float = _CONTACT_TOLERANCE,
+) -> bool:
+    return all(
+        bounds_axis_gap(first_bounds, second_bounds, axis=axis) <= float(tolerance)
+        for axis in axes
+    )
+
+
+def face_gap(
+    source_bounds: Mapping[str, Any],
+    target_bounds: Mapping[str, Any],
+    *,
+    source_face: str,
+    target_face: str,
+) -> float:
+    source_face_name = str(source_face).strip().lower()
+    target_face_name = str(target_face).strip().lower()
+    if source_face_name not in _FACE_AXES:
+        raise ValueError(f"Unsupported source face '{source_face}'")
+    if target_face_name not in _FACE_AXES:
+        raise ValueError(f"Unsupported target face '{target_face}'")
+    source_axis, _ = _FACE_AXES[source_face_name]
+    target_axis, _ = _FACE_AXES[target_face_name]
+    if source_axis != target_axis:
+        raise ValueError("Face gap requires faces on the same axis")
+    source_center = face_center(source_bounds, source_face_name)
+    target_center = face_center(target_bounds, target_face_name)
+    return abs(float(source_center[source_axis]) - float(target_center[target_axis]))
+
+
 def lowest_z(obj: Any) -> float:
     return float(world_bounds(obj)["min"][2])
 
@@ -267,6 +359,259 @@ def is_floor_like(obj: Any) -> bool:
 
     extents = bounds_extents(world_bounds(obj))
     return extents[2] <= 0.25 and extents[0] >= 2.0 and extents[1] >= 2.0
+
+
+def is_wall_like(obj: Any) -> bool:
+    if object_type(obj) != "MESH":
+        return False
+
+    extents = bounds_extents(world_bounds(obj))
+    horizontal_extents = (float(extents[0]), float(extents[1]))
+    return (
+        float(extents[2]) >= 1.0
+        and min(horizontal_extents) <= 0.35
+        and max(horizontal_extents) >= 1.0
+    )
+
+
+def is_grounded_on(
+    target_bounds: Mapping[str, Any],
+    reference_bounds: Mapping[str, Any],
+    *,
+    tolerance: float = _CONTACT_TOLERANCE,
+) -> bool:
+    target_minimum = _coerce_vector3(target_bounds.get("min"))
+    reference_maximum = _coerce_vector3(reference_bounds.get("max"))
+    return (
+        abs(float(target_minimum[2]) - float(reference_maximum[2])) <= float(tolerance)
+        and bounds_overlap_on_axes(target_bounds, reference_bounds, (0, 1), tolerance=tolerance)
+    )
+
+
+def floor_contact_record(
+    target: Mapping[str, Any],
+    floor_candidates: Iterable[Mapping[str, Any]],
+    *,
+    tolerance: float = _CONTACT_TOLERANCE,
+) -> dict[str, Any] | None:
+    target_name = str(target.get("name", "")).strip()
+    target_bounds = world_bounds(target)
+    contacts: list[dict[str, Any]] = []
+    for candidate in floor_candidates:
+        floor_name = str(candidate.get("name", "")).strip()
+        if not floor_name or floor_name == target_name:
+            continue
+        floor_bounds = world_bounds(candidate)
+        if not is_grounded_on(target_bounds, floor_bounds, tolerance=tolerance):
+            continue
+        gap = face_gap(target_bounds, floor_bounds, source_face="bottom", target_face="top")
+        contacts.append(
+            {
+                "object": floor_name,
+                "gap": float(gap),
+            }
+        )
+    if not contacts:
+        return None
+    return sorted(contacts, key=lambda item: (item["gap"], item["object"]))[0]
+
+
+def classify_spatial_relation(
+    source: Mapping[str, Any],
+    target: Mapping[str, Any],
+    *,
+    contact_tolerance: float = _CONTACT_TOLERANCE,
+    near_tolerance: float = _NEAR_TOLERANCE,
+) -> list[str]:
+    source_bounds = world_bounds(source)
+    target_bounds = world_bounds(target)
+    source_center = bounds_center(source_bounds)
+    target_center = bounds_center(target_bounds)
+    relations: list[str] = []
+
+    xy_overlap = bounds_overlap_on_axes(source_bounds, target_bounds, (0, 1), tolerance=contact_tolerance)
+    xz_overlap = bounds_overlap_on_axes(source_bounds, target_bounds, (0, 2), tolerance=contact_tolerance)
+    yz_overlap = bounds_overlap_on_axes(source_bounds, target_bounds, (1, 2), tolerance=contact_tolerance)
+
+    if is_grounded_on(source_bounds, target_bounds, tolerance=contact_tolerance):
+        relations.append("on")
+
+    if xy_overlap:
+        z_gap = bounds_axis_gap(source_bounds, target_bounds, axis=2)
+        if source_center[2] > target_center[2] and z_gap <= near_tolerance:
+            relations.append("above")
+        elif source_center[2] < target_center[2] and z_gap <= near_tolerance:
+            relations.append("below")
+
+    x_gap = bounds_axis_gap(source_bounds, target_bounds, axis=0)
+    if yz_overlap and x_gap <= near_tolerance:
+        if abs(x_gap) <= contact_tolerance:
+            relations.append("against")
+        relations.append("left_of" if source_center[0] < target_center[0] else "right_of")
+        relations.append("next_to")
+
+    y_gap = bounds_axis_gap(source_bounds, target_bounds, axis=1)
+    if xz_overlap and y_gap <= near_tolerance:
+        if abs(y_gap) <= contact_tolerance:
+            relations.append("against")
+        relations.append("behind" if source_center[1] < target_center[1] else "in_front_of")
+        relations.append("next_to")
+
+    deduped: list[str] = []
+    for relation in relations:
+        if relation not in deduped:
+            deduped.append(relation)
+    return deduped
+
+
+def spatial_relations(
+    objects: Iterable[Mapping[str, Any]],
+    *,
+    contact_tolerance: float = _CONTACT_TOLERANCE,
+    near_tolerance: float = _NEAR_TOLERANCE,
+) -> list[dict[str, Any]]:
+    records = sorted(
+        [obj for obj in objects if isinstance(obj.get("name"), str) and obj.get("bounds")],
+        key=lambda item: str(item.get("name", "")),
+    )
+    relations: list[dict[str, Any]] = []
+    for source in records:
+        source_name = str(source.get("name", "")).strip()
+        for target in records:
+            target_name = str(target.get("name", "")).strip()
+            if not source_name or not target_name or source_name == target_name:
+                continue
+            for relation in classify_spatial_relation(
+                source,
+                target,
+                contact_tolerance=contact_tolerance,
+                near_tolerance=near_tolerance,
+            ):
+                relations.append(
+                    {
+                        "source": source_name,
+                        "target": target_name,
+                        "relation": relation,
+                    }
+                )
+    return sorted(
+        relations,
+        key=lambda item: (item["source"], item["target"], item["relation"]),
+    )
+
+
+def spatial_metadata_for_object(
+    obj: Mapping[str, Any],
+    *,
+    floor_candidates: Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    bounds = world_bounds(obj)
+    center = bounds_center(bounds)
+    extents = bounds_extents(bounds)
+    half_extents = bounds_half_extents(bounds)
+    floor_contact = floor_contact_record(obj, floor_candidates)
+    return {
+        "center": vector_to_list(center),
+        "extents": vector_to_list(extents),
+        "half_extents": vector_to_list(half_extents),
+        "face_centers": face_centers_to_lists(bounds),
+        "grounded": floor_contact is not None or abs(float(bounds["min"][2])) <= _CONTACT_TOLERANCE,
+        "floor_contact": floor_contact,
+        "is_floor_like": is_floor_like(obj),
+        "is_wall_like": is_wall_like(obj),
+    }
+
+
+def _scene_bounds_from_records(records: list[Mapping[str, Any]]) -> dict[str, tuple[float, float, float]] | None:
+    if not records:
+        return None
+    bounds = [world_bounds(record) for record in records]
+    return {
+        "min": tuple(min(float(item["min"][index]) for item in bounds) for index in range(3)),
+        "max": tuple(max(float(item["max"][index]) for item in bounds) for index in range(3)),
+    }
+
+
+def _wall_inner_face(wall_bounds: Mapping[str, Any], scene_bounds: Mapping[str, Any]) -> str | None:
+    extents = bounds_extents(wall_bounds)
+    horizontal = [(0, extents[0]), (1, extents[1])]
+    thin_axis, thin_extent = min(horizontal, key=lambda item: item[1])
+    if float(thin_extent) > 0.35:
+        return None
+    wall_center = bounds_center(wall_bounds)
+    scene_center = bounds_center(scene_bounds)
+    if thin_axis == 0:
+        return "right" if wall_center[0] <= scene_center[0] else "left"
+    return "front" if wall_center[1] <= scene_center[1] else "back"
+
+
+def spatial_anchors(objects: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    records = sorted(
+        [obj for obj in objects if isinstance(obj.get("name"), str) and obj.get("bounds")],
+        key=lambda item: str(item.get("name", "")),
+    )
+    scene_bounds = _scene_bounds_from_records(records)
+    anchors: list[dict[str, Any]] = []
+
+    for obj in records:
+        name = str(obj.get("name", "")).strip()
+        bounds = world_bounds(obj)
+        for face, center in all_face_centers(bounds).items():
+            anchors.append(
+                {
+                    "name": f"{name}.face.{face}",
+                    "type": "object_face",
+                    "object": name,
+                    "face": face,
+                    "location": vector_to_list(center),
+                }
+            )
+
+        if is_floor_like(obj):
+            anchors.append(
+                {
+                    "name": f"{name}.floor.top",
+                    "type": "floor_top",
+                    "object": name,
+                    "location": vector_to_list(face_center(bounds, "top")),
+                }
+            )
+            anchors.append(
+                {
+                    "name": f"{name}.floor.center",
+                    "type": "floor_center",
+                    "object": name,
+                    "location": vector_to_list(bounds_center(bounds)),
+                }
+            )
+
+        if scene_bounds is not None and is_wall_like(obj):
+            inner_face = _wall_inner_face(bounds, scene_bounds)
+            if inner_face:
+                anchors.append(
+                    {
+                        "name": f"{name}.wall.inner",
+                        "type": "wall_inner_face",
+                        "object": name,
+                        "face": inner_face,
+                        "location": vector_to_list(face_center(bounds, inner_face)),
+                    }
+                )
+
+    if scene_bounds is not None:
+        minimum = _coerce_vector3(scene_bounds.get("min"))
+        maximum = _coerce_vector3(scene_bounds.get("max"))
+        for x_name, x_value in (("min_x", minimum[0]), ("max_x", maximum[0])):
+            for y_name, y_value in (("min_y", minimum[1]), ("max_y", maximum[1])):
+                anchors.append(
+                    {
+                        "name": f"scene.corner.{x_name}.{y_name}",
+                        "type": "scene_corner",
+                        "location": [float(x_value), float(y_value), float(minimum[2])],
+                    }
+                )
+
+    return sorted(anchors, key=lambda item: item["name"])
 
 
 def find_floor_object(objects: Iterable[Any]) -> Any | None:
