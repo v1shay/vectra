@@ -9,21 +9,19 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised in plain Python tests
     bpy = None
 
+from vectra.tools.spatial import (
+    bounds_to_lists,
+    spatial_anchors,
+    spatial_metadata_for_object,
+    spatial_relations,
+    world_bounds,
+)
+
 _SCREENSHOT_DIR = Path(tempfile.gettempdir()) / "vectra-agent-screenshots"
 
 
 def _vector_to_list(vector: Any, size: int = 3) -> list[float]:
     return [float(component) for component in vector[:size]]
-
-
-def _approx_bounds(obj: Any) -> dict[str, list[float]]:
-    location = _vector_to_list(obj.location)
-    dimensions = _vector_to_list(getattr(obj, "dimensions", (2.0, 2.0, 2.0)))
-    half_extents = [dimension / 2.0 for dimension in dimensions]
-    return {
-        "min": [location[index] - half_extents[index] for index in range(3)],
-        "max": [location[index] + half_extents[index] for index in range(3)],
-    }
 
 
 def _material_names(obj: Any) -> list[str]:
@@ -169,6 +167,23 @@ def _collection_groups(scene: Any) -> list[dict[str, Any]]:
     return groups
 
 
+def _attach_spatial_metadata(objects: list[dict[str, Any]]) -> None:
+    floor_candidates = [
+        obj
+        for obj in objects
+        if spatial_metadata_for_object(obj).get("is_floor_like")
+    ]
+    for obj in objects:
+        obj["spatial"] = spatial_metadata_for_object(obj, floor_candidates=floor_candidates)
+
+    relations = spatial_relations(objects)
+    relations_by_source: dict[str, list[dict[str, Any]]] = {}
+    for relation in relations:
+        relations_by_source.setdefault(str(relation["source"]), []).append(relation)
+    for obj in objects:
+        obj["relations"] = relations_by_source.get(str(obj.get("name", "")), [])
+
+
 def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
     if bpy is None:
         raise RuntimeError("Blender Python API is unavailable")
@@ -181,7 +196,7 @@ def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
         rotation = _vector_to_list(obj.rotation_euler)
         scale = _vector_to_list(obj.scale)
         dimensions = _vector_to_list(getattr(obj, "dimensions", (2.0, 2.0, 2.0)))
-        bounds = _approx_bounds(obj)
+        bounds = bounds_to_lists(world_bounds(obj))
         materials = _material_names(obj)
         keyframe_count = _keyframe_count(obj)
         animation_summary = _animation_summary(obj)
@@ -215,6 +230,8 @@ def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
             object_record["camera_lens"] = float(getattr(getattr(obj, "data", None), "lens", 0.0))
         objects.append(object_record)
 
+    _attach_spatial_metadata(objects)
+
     active_camera = getattr(scene, "camera", None)
     lights = [
         {
@@ -236,6 +253,8 @@ def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
         "active_camera": active_camera.name if active_camera is not None else None,
         "scene_centroid": centroid,
         "scene_bounds": bounds,
+        "spatial_anchors": spatial_anchors(objects),
+        "spatial_relations": spatial_relations(objects),
         "groups": _collection_groups(scene),
         "lights": lights,
         "objects": objects,
