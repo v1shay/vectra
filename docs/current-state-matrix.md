@@ -1,6 +1,8 @@
 # Vectra Current-State Matrix
 
-This matrix rebases the April 2026 audit against the current code instead of treating the older findings as perfectly current.
+This matrix rebases the April 2026 audits against the current code instead of treating the older findings as perfectly current.
+
+Latest full intelligence-layer audit: `docs/intelligence-layer-audit-2026-04-16.md`.
 
 ## Status Key
 
@@ -23,7 +25,9 @@ This matrix rebases the April 2026 audit against the current code instead of tre
 
 ## What Still Matters Most
 
-1. Run the updated audit suite, especially the docs ceiling prompt under `vectra-dev`.
-2. Confirm that structural partial progress actually keeps the loop alive in live Blender runs.
-3. Check whether the new batch pressure improves scene composition or just changes failure shape.
-4. Decide whether the next bottleneck after this pass is still modeling breadth or if it has shifted to output polish.
+1. Treat the current system as Level 2: a single-agent Director loop with deterministic tools, not yet the final semantic intelligence layer.
+2. Repair `scripts/verify_phase1_live.py`; it still references retired planner APIs and should verify the current Director path.
+3. Run the updated audit suite, especially the docs ceiling prompt under `vectra-dev`, with provider/model chain recorded per run.
+4. Confirm that structural partial progress improves scene completion instead of only rewarding object churn.
+5. Check whether batch pressure improves scene composition or just changes the failure shape.
+6. Build the missing SIG/EG, visual-feedback, objective-completion, LangGraph/sub-agent, and imported-model layers before judging Vectra as a real scene-production agent.
