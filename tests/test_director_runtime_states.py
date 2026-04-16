@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from agent_runtime.director.adapters import (
@@ -47,6 +48,142 @@ class FakeAdapter:
             ),
             capabilities=self.capabilities,
         )
+
+
+def _endpoint() -> EndpointConfig:
+    return EndpointConfig(
+        provider="openai-director",
+        family="openai",
+        base_url="https://api.openai.test/v1",
+        api_key="test-openai",
+        model="gpt-5.1",
+        transport="responses",
+    )
+
+
+def _responses_request() -> ProviderRequest:
+    return ProviderRequest(
+        instructions="You are the director.",
+        user_input="Create a cube.",
+        tools=[
+            {
+                "type": "function",
+                "name": "mesh.create_primitive",
+                "description": "Create a primitive mesh.",
+                "parameters": {"type": "object", "properties": {"type": {"type": "string"}}},
+            }
+        ],
+    )
+
+
+def _http_response(status_code: int, payload: object, *, text: str | None = None) -> httpx.Response:
+    request = httpx.Request("POST", "https://api.openai.test/v1/responses")
+    if text is not None:
+        return httpx.Response(status_code, text=text, request=request)
+    return httpx.Response(status_code, json=payload, request=request)
+
+
+def test_http_provider_retries_retryable_500_before_success(monkeypatch) -> None:
+    responses = [
+        _http_response(500, {"error": {"message": "temporary failure"}}),
+        _http_response(
+            200,
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "mesh.create_primitive",
+                        "arguments": '{"type":"cube","name":"Cube"}',
+                    }
+                ]
+            },
+        ),
+    ]
+    calls: list[str] = []
+
+    def fake_post(*args, **kwargs):
+        del args, kwargs
+        calls.append("post")
+        return responses.pop(0)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = OpenAIResponsesAdapter().invoke(
+        _endpoint(),
+        _responses_request(),
+        timeout=3.0,
+        max_retries=1,
+    )
+
+    assert len(calls) == 2
+    assert result.parsed is not None
+    assert result.parsed.tool_calls[0].name == "mesh.create_primitive"
+    assert result.attempt.response_metadata["retry_count"] == 1
+    assert [item["status_code"] for item in result.attempt.response_metadata["transport_attempts"]] == [500, 200]
+
+
+def test_http_provider_fail_fast_for_non_retryable_400(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_post(*args, **kwargs):
+        del args, kwargs
+        calls.append("post")
+        return _http_response(400, {"error": {"message": "bad request"}})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = OpenAIResponsesAdapter().invoke(
+        _endpoint(),
+        _responses_request(),
+        timeout=3.0,
+        max_retries=2,
+    )
+
+    assert len(calls) == 1
+    assert result.parsed is None
+    assert result.attempt.runtime_state == "provider_transport_failure"
+    assert result.attempt.response_metadata["status_code"] == 400
+    assert result.attempt.response_metadata["retry_count"] == 0
+    assert result.attempt.response_metadata["transport_attempts"][0]["retryable"] is False
+
+
+def test_http_provider_retries_json_decode_failure(monkeypatch) -> None:
+    responses = [
+        _http_response(200, {}, text="not-json"),
+        _http_response(
+            200,
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "task.clarify",
+                        "arguments": '{"question":"q","reason":"r"}',
+                    }
+                ]
+            },
+        ),
+    ]
+    calls: list[str] = []
+
+    def fake_post(*args, **kwargs):
+        del args, kwargs
+        calls.append("post")
+        return responses.pop(0)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = OpenAIResponsesAdapter().invoke(
+        _endpoint(),
+        _responses_request(),
+        timeout=3.0,
+        max_retries=1,
+    )
+
+    assert len(calls) == 2
+    assert result.parsed is not None
+    assert result.parsed.tool_calls[0].name == "task.clarify"
+    assert result.attempt.response_metadata["retry_count"] == 1
+    assert result.attempt.response_metadata["transport_attempts"][0]["error_type"] == "JSONDecodeError"
 
 
 def _context(prompt: str = "make something cool"):

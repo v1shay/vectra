@@ -34,24 +34,67 @@ def test_reference_resolver_uses_active_object_for_vague_pronouns() -> None:
     assert result.assumptions[0].reason.startswith("Used the active object")
 
 
-def test_reference_resolver_uses_scene_centroid_or_origin_for_missing_location() -> None:
+def test_reference_resolver_grounds_new_primitives_on_floor_anchor() -> None:
     resolver = ReferenceResolver(
         _context(
             {
                 "active_object": None,
                 "selected_objects": [],
                 "objects": [
-                    {"name": "Cube_1", "location": [2.0, 0.0, 0.0], "dimensions": [2.0, 2.0, 2.0]},
-                    {"name": "Cube_2", "location": [4.0, 0.0, 0.0], "dimensions": [2.0, 2.0, 2.0]},
+                    {"name": "Floor", "type": "MESH", "location": [0.0, 0.0, 0.0], "dimensions": [12.0, 12.0, 0.0]},
+                    {"name": "Cube_1", "type": "MESH", "location": [1.0, 0.0, 1.0], "dimensions": [2.0, 2.0, 2.0]},
+                    {"name": "Cube_2", "type": "MESH", "location": [3.0, 0.0, 1.0], "dimensions": [2.0, 2.0, 2.0]},
                 ],
             }
         )
     )
 
-    result = resolver.resolve_location("mesh.create_primitive", None)
+    result = resolver.resolve_location("mesh.create_primitive", None, primitive_type="cube")
 
-    assert result.value == [3.0, 0.0, 0.0]
-    assert result.metadata["anchor"] == "scene_centroid"
+    assert result.value == [0.0, 0.0, 1.0]
+    assert result.metadata["anchor"] == "Floor"
+
+
+def test_reference_resolver_does_not_chain_new_primitive_to_active_object() -> None:
+    resolver = ReferenceResolver(
+        _context(
+            {
+                "active_object": "Cube_1",
+                "selected_objects": ["Cube_1"],
+                "objects": [
+                    {"name": "Floor", "type": "MESH", "location": [0.0, 0.0, 0.0], "dimensions": [12.0, 12.0, 0.0]},
+                    {"name": "Cube_1", "type": "MESH", "location": [0.0, 0.0, 1.0], "dimensions": [2.0, 2.0, 2.0]},
+                    {"name": "FarWall", "type": "MESH", "location": [6.0, 0.0, 2.0], "dimensions": [0.2, 8.0, 4.0]},
+                ],
+            }
+        )
+    )
+
+    result = resolver.resolve_location("mesh.create_primitive", None, primitive_type="cube")
+
+    assert result.value == [0.0, 0.0, 1.0]
+    assert result.metadata["anchor"] == "Floor"
+
+
+def test_reference_resolver_required_spatial_target_does_not_fallback_to_active_object() -> None:
+    resolver = ReferenceResolver(
+        _context(
+            {
+                "active_object": "Cube_1",
+                "selected_objects": ["Cube_1"],
+                "objects": [
+                    {"name": "Cube_1", "location": [0.0, 0.0, 0.0], "dimensions": [2.0, 2.0, 2.0]},
+                    {"name": "Cube_2", "location": [3.0, 0.0, 0.0], "dimensions": [2.0, 2.0, 2.0]},
+                ],
+            }
+        )
+    )
+
+    result = resolver.resolve_required_target("it", "target")
+
+    assert result.value is None
+    assert result.metadata["anchor"] == "unresolved_required"
+    assert "no fallback target" in result.assumptions[0].reason
 
 
 def test_director_loop_records_assumptions_instead_of_failing_on_missing_target(monkeypatch) -> None:

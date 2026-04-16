@@ -54,6 +54,14 @@ class VECTRA_PT_panel(bpy.types.Panel):
         if status.mode == "packaged" and not configured_source:
             dev_box.label(text="Set Development Source Path to the repo root for backend auto-start.")
             dev_box.label(text="Packaged mode without a repo path can only talk to an already-running backend.")
+        backend_status = getattr(scene, "vectra_backend_status", "unknown")
+        dev_box.label(text=f"Backend: {backend_status}")
+        backend_log_path = getattr(scene, "vectra_backend_log_path", "")
+        if backend_log_path:
+            dev_box.label(text=f"Backend log: {backend_log_path}")
+        backend_col = dev_box.column()
+        backend_col.enabled = not scene.vectra_request_in_flight
+        backend_col.operator("vectra.start_backend", text="Start Backend")
         block_reason = get_reload_block_reason()
         if block_reason:
             dev_box.label(text=f"Reload blocked: {block_reason}")

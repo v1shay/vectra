@@ -3,6 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from vectra.tools.spatial import (
+    bounds_half_extents,
+    find_floor_object,
+    object_type,
+    place_on_surface_location,
+    primitive_bounds,
+    world_bounds,
+)
+
 from .models import AssumptionRecord, DirectorContext
 
 _VAGUE_REFERENCES = {
@@ -33,6 +42,14 @@ def _object_by_name(scene_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
         for obj in _scene_objects(scene_state)
         if isinstance(obj.get("name"), str)
     }
+
+
+def _mesh_objects(scene_state: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        obj
+        for obj in _scene_objects(scene_state)
+        if object_type(obj) == "MESH"
+    ]
 
 
 def _group_by_name(scene_state: dict[str, Any]) -> dict[str, list[str]]:
@@ -140,6 +157,9 @@ class ReferenceResolver:
         self.context = context
         self._scene_map = _object_by_name(context.scene_state)
         self._group_map = _group_by_name(context.scene_state)
+        self._mesh_objects = _mesh_objects(context.scene_state)
+        floor_candidate = find_floor_object(self._mesh_objects)
+        self._floor_name = str(floor_candidate.get("name", "")).strip() if isinstance(floor_candidate, dict) else None
 
     def resolve_target(self, raw_target: Any) -> ResolutionResult:
         assumptions: list[AssumptionRecord] = []
@@ -225,13 +245,128 @@ class ReferenceResolver:
             {"anchor": "none"},
         )
 
-    def resolve_location(self, tool_name: str, raw_location: Any, *, target_name: str | None = None) -> ResolutionResult:
+    def resolve_required_target(self, raw_target: Any, field_name: str) -> ResolutionResult:
+        assumptions: list[AssumptionRecord] = []
+        metadata: dict[str, Any] = {}
+        if isinstance(raw_target, str) and raw_target.strip():
+            stripped = raw_target.strip()
+            exact = self._scene_map.get(stripped)
+            if exact is not None:
+                metadata["anchor"] = stripped
+                return ResolutionResult(stripped, assumptions, metadata)
+            if stripped in self._group_map:
+                assumptions.append(
+                    AssumptionRecord(
+                        key=field_name,
+                        value=self._group_map[stripped][0],
+                        reason=f"Resolved group '{stripped}' to its first object for a required spatial relation target.",
+                    )
+                )
+                metadata["anchor"] = stripped
+                return ResolutionResult(self._group_map[stripped][0], assumptions, metadata)
+
+            lowered = stripped.lower()
+            if lowered not in _VAGUE_REFERENCES:
+                for name in self._scene_map:
+                    if lowered == name.lower() or lowered in name.lower():
+                        assumptions.append(
+                            AssumptionRecord(
+                                key=field_name,
+                                value=name,
+                                reason=f"Resolved required spatial relation reference '{stripped}' to the closest matching object.",
+                            )
+                        )
+                        metadata["anchor"] = name
+                        return ResolutionResult(name, assumptions, metadata)
+
+        assumptions.append(
+            AssumptionRecord(
+                key=field_name,
+                value=None,
+                reason=f"Spatial relation field '{field_name}' requires an explicit resolvable object; no fallback target was used.",
+            )
+        )
+        return ResolutionResult(None, assumptions, {"anchor": "unresolved_required"})
+
+    def _floor_record(self) -> dict[str, Any] | None:
+        if self._floor_name:
+            return self._scene_map.get(self._floor_name)
+        return None
+
+    def _grounded_primitive_location(
+        self,
+        primitive_type: str,
+        *,
+        scale: Any = None,
+    ) -> ResolutionResult:
+        assumptions: list[AssumptionRecord] = []
+        metadata: dict[str, Any] = {}
+        target_bounds = primitive_bounds(
+            primitive_type,
+            scale=_vector3(scale) if scale is not None else None,
+        )
+        target_half_extents = bounds_half_extents(target_bounds)
+        floor_record = self._floor_record()
+
+        if floor_record is not None:
+            guessed = place_on_surface_location(
+                target_bounds,
+                world_bounds(floor_record),
+                surface="top",
+                offset=0.0,
+            )
+            assumptions.append(
+                AssumptionRecord(
+                    key="location",
+                    value=[float(component) for component in guessed],
+                    reason=f"Placed the new object on the floor '{self._floor_name}' instead of guessing a raw coordinate.",
+                )
+            )
+            metadata["anchor"] = self._floor_name or "floor"
+            return ResolutionResult(list(guessed), assumptions, metadata)
+
+        if self._mesh_objects:
+            centroid = _scene_centroid(self.context.scene_state)
+            guessed = [centroid[0], centroid[1], target_half_extents[2]]
+            assumptions.append(
+                AssumptionRecord(
+                    key="location",
+                    value=guessed,
+                    reason="No floor anchor was available, so used the scene centroid with grounded Z instead of scene-footprint or world-origin placement.",
+                )
+            )
+            metadata["anchor"] = "scene_centroid_no_floor"
+            return ResolutionResult(guessed, assumptions, metadata)
+
+        guessed = [0.0, 0.0, target_half_extents[2]]
+        assumptions.append(
+            AssumptionRecord(
+                key="location",
+                value=guessed,
+                reason="Used grounded bootstrap placement at z=0 for the first geometric object.",
+            )
+        )
+        metadata["anchor"] = "bootstrap_ground"
+        return ResolutionResult(guessed, assumptions, metadata)
+
+    def resolve_location(
+        self,
+        tool_name: str,
+        raw_location: Any,
+        *,
+        target_name: str | None = None,
+        primitive_type: str | None = None,
+        scale: Any = None,
+    ) -> ResolutionResult:
         assumptions: list[AssumptionRecord] = []
         metadata: dict[str, Any] = {}
         location = _vector3(raw_location)
         if location is not None:
             metadata["anchor"] = "explicit"
             return ResolutionResult(location, assumptions, metadata)
+
+        if tool_name == "mesh.create_primitive":
+            return self._grounded_primitive_location(primitive_type or "cube", scale=scale)
 
         if target_name and target_name in self._scene_map:
             target = self._scene_map[target_name]
