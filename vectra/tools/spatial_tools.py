@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 try:
@@ -26,7 +27,22 @@ _SUPPORTED_AXES = {"x", "y", "z"}
 def _normalize_distance(value: Any, field_name: str) -> float:
     if isinstance(value, bool):
         raise ToolValidationError(f"'{field_name}' must be numeric")
-    return float(value)
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolValidationError(f"'{field_name}' must be numeric") from exc
+    if not math.isfinite(normalized):
+        raise ToolValidationError(f"'{field_name}' must be finite")
+    if normalized < 0.0:
+        raise ToolValidationError(f"'{field_name}' must be greater than or equal to 0")
+    return normalized
+
+
+def _required_object_name(value: Any, field_name: str) -> str:
+    normalized = normalize_optional_string(value, field_name)
+    if normalized is None:
+        raise ToolValidationError(f"'{field_name}' must be a non-empty string")
+    return normalized
 
 
 def _resolved_bounds_payload(obj: Any) -> dict[str, list[float]]:
@@ -93,8 +109,8 @@ class PlaceOnSurfaceTool(BaseTool):
 
     def validate_params(self, params: dict[str, Any]) -> dict[str, Any]:
         params = super().validate_params(params)
-        target = normalize_optional_string(params.get("target"), "target")
-        reference = normalize_optional_string(params.get("reference"), "reference")
+        target = _required_object_name(params.get("target"), "target")
+        reference = _required_object_name(params.get("reference"), "reference")
         surface = str(params.get("surface", "top")).strip().lower() or "top"
         if surface not in _SUPPORTED_SURFACES:
             raise ToolValidationError(f"'surface' must be one of {sorted(_SUPPORTED_SURFACES)}")
@@ -142,9 +158,9 @@ class PlaceAgainstTool(BaseTool):
 
     def validate_params(self, params: dict[str, Any]) -> dict[str, Any]:
         params = super().validate_params(params)
-        target = normalize_optional_string(params.get("target"), "target")
-        reference = normalize_optional_string(params.get("reference"), "reference")
-        side = normalize_optional_string(params.get("side"), "side")
+        target = _required_object_name(params.get("target"), "target")
+        reference = _required_object_name(params.get("reference"), "reference")
+        side = _required_object_name(params.get("side"), "side")
         normalized_side = str(side).strip().lower()
         if normalized_side not in _SUPPORTED_SURFACES:
             raise ToolValidationError(f"'side' must be one of {sorted(_SUPPORTED_SURFACES)}")
@@ -167,6 +183,7 @@ class PlaceAgainstTool(BaseTool):
             world_bounds(reference),
             side=validated["side"],
             offset=float(validated["offset"]),
+            current_location=getattr(target, "location", None),
         )
         target.location = location
         _update_view_layer(context)
@@ -192,9 +209,9 @@ class PlaceRelativeTool(BaseTool):
 
     def validate_params(self, params: dict[str, Any]) -> dict[str, Any]:
         params = super().validate_params(params)
-        target = normalize_optional_string(params.get("target"), "target")
-        reference = normalize_optional_string(params.get("reference"), "reference")
-        relation = normalize_optional_string(params.get("relation"), "relation")
+        target = _required_object_name(params.get("target"), "target")
+        reference = _required_object_name(params.get("reference"), "reference")
+        relation = _required_object_name(params.get("relation"), "relation")
         normalized_relation = str(relation).strip().lower()
         if normalized_relation not in _SUPPORTED_RELATIONS:
             raise ToolValidationError(f"'relation' must be one of {sorted(_SUPPORTED_RELATIONS)}")
@@ -217,6 +234,7 @@ class PlaceRelativeTool(BaseTool):
             world_bounds(reference),
             relation=validated["relation"],
             distance=float(validated["distance"]),
+            current_location=getattr(target, "location", None),
         )
         target.location = location
         _update_view_layer(context)
@@ -241,9 +259,9 @@ class AlignToTool(BaseTool):
 
     def validate_params(self, params: dict[str, Any]) -> dict[str, Any]:
         params = super().validate_params(params)
-        target = normalize_optional_string(params.get("target"), "target")
-        reference = normalize_optional_string(params.get("reference"), "reference")
-        axis = normalize_optional_string(params.get("axis"), "axis")
+        target = _required_object_name(params.get("target"), "target")
+        reference = _required_object_name(params.get("reference"), "reference")
+        axis = _required_object_name(params.get("axis"), "axis")
         normalized_axis = str(axis).strip().lower()
         if normalized_axis not in _SUPPORTED_AXES:
             raise ToolValidationError(f"'axis' must be one of {sorted(_SUPPORTED_AXES)}")
