@@ -127,6 +127,71 @@ def test_director_falls_back_to_xai_when_openai_fails(monkeypatch: pytest.Monkey
     assert result.runtime_state == "fallback_provider_invoked"
 
 
+def test_director_preserves_retryable_primary_failure_metadata_before_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VECTRA_DIRECTOR_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("VECTRA_DIRECTOR_API_KEY", "test-openai")
+    monkeypatch.setenv("VECTRA_DIRECTOR_MODEL", "gpt-5.1")
+    monkeypatch.setenv("VECTRA_CONTROLLER_BASE_URL", "https://api.x.ai/v1")
+    monkeypatch.setenv("VECTRA_CONTROLLER_API_KEY", "test-xai")
+    monkeypatch.setenv("VECTRA_CONTROLLER_MODEL", "grok-4.2-reasoning")
+
+    def fake_invoke(config, request, timeout, max_retries):
+        del request, timeout, max_retries
+        if config.provider == "openai-director":
+            return AdapterCallResult(
+                parsed=None,
+                attempt=ProviderAttempt(
+                    provider=config.provider,
+                    model=config.model,
+                    transport=config.transport,
+                    runtime_state="provider_transport_failure",
+                    response_type="transport_failure",
+                    failure_reason="HTTP 500 temporary failure",
+                    request_metadata={"tool_count": 0},
+                    response_metadata={
+                        "status_code": 500,
+                        "retry_count": 2,
+                        "transport_attempts": [
+                            {"attempt": 1, "status_code": 500, "retryable": True},
+                            {"attempt": 2, "status_code": 500, "retryable": True},
+                            {"attempt": 3, "status_code": 500, "retryable": True},
+                        ],
+                    },
+                ),
+                capabilities=ProviderAdapterCapabilities(),
+            )
+        return AdapterCallResult(
+            parsed=ParsedProviderResponse(
+                tool_calls=[ToolCall(name="task.clarify", arguments={"question": "q", "reason": "r"})],
+                response_type="clarify",
+            ),
+            attempt=ProviderAttempt(
+                provider=config.provider,
+                model=config.model,
+                transport=config.transport,
+                runtime_state="valid_action_batch_ready",
+                response_type="clarify",
+                request_metadata={"tool_count": 0},
+            ),
+            capabilities=ProviderAdapterCapabilities(),
+        )
+
+    monkeypatch.setattr(
+        "agent_runtime.director.providers.get_provider_adapter",
+        lambda config: FakeAdapter(fake_invoke),
+    )
+
+    result = call_director(prompt_text="prompt", tools=[], allow_complete=False)
+
+    assert result.provider == "xai-director-fallback"
+    assert result.runtime_state == "fallback_provider_invoked"
+    assert result.attempts[0].response_metadata["status_code"] == 500
+    assert result.attempts[0].response_metadata["retry_count"] == 2
+    assert result.provider_chain[0] == "openai-director:gpt-5.1"
+
+
 def test_director_falls_back_to_ollama_after_cloud_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VECTRA_DIRECTOR_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("VECTRA_DIRECTOR_API_KEY", "test-openai")

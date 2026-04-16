@@ -86,6 +86,29 @@ def test_ensure_local_backend_reports_actionable_error_when_repo_is_missing(
         )
 
 
+def test_managed_backend_log_path_prefers_active_managed_path(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "vectra"
+    repo_root.mkdir()
+
+    runtime_service._MANAGED_BACKEND_LOG_PATH = repo_root / ".vectra" / "backend.log"
+
+    assert runtime_service.managed_backend_log_path() == str(repo_root / ".vectra" / "backend.log")
+
+
+def test_managed_backend_log_path_uses_discovered_repo_without_creating_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "vectra"
+    repo_root.mkdir()
+    monkeypatch.setattr(runtime_service, "_discover_repo_root", lambda repo_root_hint: repo_root)
+
+    assert runtime_service.managed_backend_log_path("/tmp/vectra") == str(repo_root / ".vectra" / "backend.log")
+    assert not (repo_root / ".vectra").exists()
+
+
 def test_manual_start_command_uses_repo_root_package_entrypoint() -> None:
     command = runtime_service._manual_start_command("/tmp/vectra", "http://127.0.0.1:8000")
 

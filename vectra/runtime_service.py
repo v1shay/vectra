@@ -135,6 +135,16 @@ def _backend_log_path(repo_root: Path) -> Path:
     return log_dir / "backend.log"
 
 
+def managed_backend_log_path(repo_root_hint: str | None = None) -> str | None:
+    if _MANAGED_BACKEND_LOG_PATH is not None:
+        return str(_MANAGED_BACKEND_LOG_PATH)
+
+    repo_root = _discover_repo_root(repo_root_hint)
+    if repo_root is None:
+        return None
+    return str(repo_root / ".vectra" / "backend.log")
+
+
 def _runtime_env_path(repo_root: Path) -> Path:
     return repo_root / ".vectra" / RUNTIME_ENV_FILE_NAME
 
