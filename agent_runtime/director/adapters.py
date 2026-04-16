@@ -31,10 +31,12 @@ class ProviderError(Exception):
         *,
         runtime_state: RuntimeState = "provider_transport_failure",
         attempts: list[ProviderAttempt] | None = None,
+        response_metadata: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.runtime_state = runtime_state
         self.attempts = attempts or []
+        self.response_metadata = response_metadata or {}
 
 
 class ProviderTimeoutError(ProviderError):
@@ -134,6 +136,42 @@ def _responses_max_output_tokens(tool_count: int) -> int:
     return 1024 if tool_count else 512
 
 
+_RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+_FAIL_FAST_HTTP_STATUS_CODES = {400, 401, 403, 404}
+
+
+def _payload_preview(value: Any, *, limit: int = 500) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value[:limit]
+    try:
+        return json.dumps(value, sort_keys=True, default=str)[:limit]
+    except (TypeError, ValueError):
+        return str(value)[:limit]
+
+
+def _status_code_from_error(exc: BaseException) -> int | None:
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        return int(exc.response.status_code)
+    return None
+
+
+def _is_retryable_transport_error(exc: BaseException) -> bool:
+    status_code = _status_code_from_error(exc)
+    if status_code is not None:
+        if status_code in _FAIL_FAST_HTTP_STATUS_CODES:
+            return False
+        return status_code in _RETRYABLE_HTTP_STATUS_CODES
+    return isinstance(exc, (httpx.TimeoutException, httpx.RequestError, ValueError))
+
+
+def _runtime_state_for_transport_error(exc: BaseException) -> RuntimeState:
+    if isinstance(exc, httpx.TimeoutException):
+        return "provider_deadline_exceeded"
+    return "provider_transport_failure"
+
+
 class BaseProviderAdapter(ABC):
     family: str = ""
     transport: str = ""
@@ -176,6 +214,10 @@ class BaseProviderAdapter(ABC):
             )
         except ProviderError as exc:
             runtime_state = getattr(exc, "runtime_state", "provider_transport_failure")
+            response_metadata = {
+                "error_type": exc.__class__.__name__,
+                **getattr(exc, "response_metadata", {}),
+            }
             attempt = ProviderAttempt(
                 provider=endpoint.provider,
                 model=endpoint.model,
@@ -183,7 +225,7 @@ class BaseProviderAdapter(ABC):
                 runtime_state=runtime_state,
                 failure_reason=str(exc),
                 request_metadata=http_request.request_metadata,
-                response_metadata={"error_type": exc.__class__.__name__},
+                response_metadata=response_metadata,
             )
             log_structured(
                 _LOGGER,
@@ -204,6 +246,7 @@ class BaseProviderAdapter(ABC):
             "response_type": parsed.response_type,
             "parsed_tool_call_count": len(parsed.tool_calls),
             "raw_response_keys": sorted(raw_response.keys())[:20],
+            **getattr(self, "_last_transport_metadata", {}),
         }
         log_structured(
             _LOGGER,
@@ -247,6 +290,9 @@ class BaseProviderAdapter(ABC):
 
 
 class HttpJsonProviderAdapter(BaseProviderAdapter):
+    def _set_last_transport_metadata(self, metadata: dict[str, Any]) -> None:
+        self._last_transport_metadata = metadata
+
     def _request_with_logging(
         self,
         endpoint: EndpointConfig,
@@ -256,6 +302,9 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
         max_retries: int,
     ) -> dict[str, Any]:
         last_error: Exception | None = None
+        transport_attempts: list[dict[str, Any]] = []
+        payload_preview = _payload_preview(http_request.payload)
+        self._set_last_transport_metadata({})
         for attempt in range(1, max_retries + 2):
             started = time.perf_counter()
             log_structured(
@@ -282,8 +331,27 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                 response.raise_for_status()
                 payload = response.json()
                 if not isinstance(payload, dict):
-                    raise ProviderError("Provider returned a non-object JSON payload")
+                    raise ValueError("Provider returned a non-object JSON payload")
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
+                transport_attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status_code": int(response.status_code),
+                        "elapsed_ms": elapsed_ms,
+                        "retryable": False,
+                        "failure_reason": "",
+                        "payload_preview": payload_preview,
+                    }
+                )
+                self._set_last_transport_metadata(
+                    {
+                        "transport_attempts": transport_attempts,
+                        "retry_count": attempt - 1,
+                        "status_code": int(response.status_code),
+                        "elapsed_ms": elapsed_ms,
+                        "payload_preview": payload_preview,
+                    }
+                )
                 log_structured(
                     _LOGGER,
                     "llm_request_completed",
@@ -296,34 +364,40 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                     },
                 )
                 return payload
-            except httpx.TimeoutException as exc:
+            except (httpx.HTTPError, ValueError) as exc:
                 last_error = exc
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
-                log_structured(
-                    _LOGGER,
-                    "llm_request_timed_out",
-                    {
-                        "provider": endpoint.provider,
-                        "model": endpoint.model,
-                        "transport": endpoint.transport,
-                        "attempt": attempt,
-                        "elapsed_ms": elapsed_ms,
-                    },
-                    level="warning",
-                )
-                if attempt > max_retries:
-                    raise ProviderTimeoutError(
-                        str(exc) or "provider request timed out",
-                        runtime_state="provider_deadline_exceeded",
-                    ) from exc
-            except (httpx.HTTPError, ValueError) as exc:
-                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                status_code = _status_code_from_error(exc)
                 error_payload = ""
                 if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
                     try:
                         error_payload = exc.response.text[:500]
                     except Exception:  # pragma: no cover - defensive logging only
                         error_payload = ""
+                retryable = _is_retryable_transport_error(exc)
+                failure_reason = str(exc) or "provider request failed"
+                transport_attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status_code": status_code,
+                        "elapsed_ms": elapsed_ms,
+                        "retryable": retryable,
+                        "failure_reason": failure_reason,
+                        "payload_preview": payload_preview,
+                        "error_payload_preview": error_payload,
+                        "error_type": exc.__class__.__name__,
+                    }
+                )
+                response_metadata = {
+                    "transport_attempts": transport_attempts,
+                    "retry_count": attempt - 1,
+                    "status_code": status_code,
+                    "elapsed_ms": elapsed_ms,
+                    "failure_reason": failure_reason,
+                    "payload_preview": payload_preview,
+                    "error_payload_preview": error_payload,
+                    "error_type": exc.__class__.__name__,
+                }
                 log_structured(
                     _LOGGER,
                     "provider_failure",
@@ -333,15 +407,30 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                         "transport": endpoint.transport,
                         "attempt": attempt,
                         "elapsed_ms": elapsed_ms,
-                        "error": str(exc),
+                        "status_code": status_code,
+                        "retryable": retryable,
+                        "error": failure_reason,
                         "error_payload": error_payload,
                     },
-                    level="error",
+                    level="warning" if retryable and attempt <= max_retries else "error",
                 )
-                raise ProviderError(str(exc) or "provider request failed") from exc
+                if retryable and attempt <= max_retries:
+                    continue
+
+                error_cls = ProviderTimeoutError if isinstance(exc, httpx.TimeoutException) else ProviderError
+                raise error_cls(
+                    failure_reason,
+                    runtime_state=_runtime_state_for_transport_error(exc),
+                    response_metadata=response_metadata,
+                ) from exc
         raise ProviderTimeoutError(
             str(last_error) if last_error else "provider request timed out",
             runtime_state="provider_deadline_exceeded",
+            response_metadata={
+                "transport_attempts": transport_attempts,
+                "retry_count": max(len(transport_attempts) - 1, 0),
+                "payload_preview": payload_preview,
+            },
         )
 
     def execute(
