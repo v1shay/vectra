@@ -8,6 +8,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import vectra.tools.registry as registry_module
+from vectra.bridge.client import BridgeConnectionError
 
 
 class FakeScenes(dict):
@@ -144,12 +145,14 @@ def test_addon_runtime_register_unregister_cycle_is_reload_safe(
     runtime_module.register()
     runtime_module.register()
 
-    assert fake_bpy.utils.registered_names == {"vectra.run_task", "VECTRA_PT_panel"}
+    assert fake_bpy.utils.registered_names == {"vectra.start_backend", "vectra.run_task", "VECTRA_PT_panel"}
     for attribute_name in (
         "vectra_prompt",
         "vectra_status",
         "vectra_phase",
         "vectra_runtime_state",
+        "vectra_backend_status",
+        "vectra_backend_log_path",
         "vectra_request_in_flight",
         "vectra_execution_mode",
         "vectra_agent_transcript",
@@ -176,6 +179,8 @@ def test_addon_runtime_register_unregister_cycle_is_reload_safe(
         "vectra_status",
         "vectra_phase",
         "vectra_runtime_state",
+        "vectra_backend_status",
+        "vectra_backend_log_path",
         "vectra_request_in_flight",
         "vectra_execution_mode",
         "vectra_agent_transcript",
@@ -213,6 +218,150 @@ def test_addon_runtime_register_handles_cold_scene_without_vectra_properties(
 
     assert hasattr(fake_bpy.types.Scene, "vectra_prompt")
     assert hasattr(fake_bpy.types.Scene, "vectra_status")
+    assert hasattr(fake_bpy.types.Scene, "vectra_backend_status")
+    assert hasattr(fake_bpy.types.Scene, "vectra_backend_log_path")
+
+
+def test_start_backend_operator_uses_local_managed_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bpy = _make_fake_bpy()
+    scene = fake_bpy.types.Scene()
+    scene.vectra_request_in_flight = False
+    scene.vectra_status = "Idle"
+    scene.vectra_backend_status = "unknown"
+    scene.vectra_backend_log_path = ""
+    context = SimpleNamespace(
+        scene=scene,
+        preferences=SimpleNamespace(
+            addons={"vectra": SimpleNamespace(preferences=SimpleNamespace(dev_source_path="/tmp/vectra"))}
+        ),
+    )
+    fake_bpy.context = context
+
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    for module_name in (
+        "vectra.addon_bootstrap",
+        "vectra.operators.run_task",
+    ):
+        sys.modules.pop(module_name, None)
+    run_task_module = _reload_module("vectra.operators.run_task")
+
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        run_task_module,
+        "ensure_local_backend",
+        lambda *, base_url, repo_root_hint=None: calls.append((base_url, repo_root_hint)),
+    )
+    monkeypatch.setattr(
+        run_task_module,
+        "managed_backend_log_path",
+        lambda repo_root_hint=None: "/tmp/vectra/.vectra/backend.log",
+    )
+
+    result = run_task_module.VECTRA_OT_start_backend().execute(context)
+
+    assert result == {"FINISHED"}
+    assert calls == [(run_task_module.DEFAULT_BASE_URL, "/tmp/vectra")]
+    assert scene.vectra_backend_status == "online"
+    assert scene.vectra_backend_log_path == "/tmp/vectra/.vectra/backend.log"
+    assert scene.vectra_status == "Backend online"
+
+
+def test_start_backend_operator_surfaces_actionable_start_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bpy = _make_fake_bpy()
+    scene = fake_bpy.types.Scene()
+    scene.vectra_request_in_flight = False
+    scene.vectra_status = "Idle"
+    scene.vectra_backend_status = "unknown"
+    scene.vectra_backend_log_path = ""
+    context = SimpleNamespace(scene=scene, preferences=SimpleNamespace(addons={}))
+    fake_bpy.context = context
+
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    sys.modules.pop("vectra.operators.run_task", None)
+    run_task_module = _reload_module("vectra.operators.run_task")
+    monkeypatch.setattr(
+        run_task_module,
+        "ensure_local_backend",
+        lambda **kwargs: (_ for _ in ()).throw(
+            BridgeConnectionError("could not find a repo checkout with agent_runtime")
+        ),
+    )
+    monkeypatch.setattr(
+        run_task_module,
+        "managed_backend_log_path",
+        lambda repo_root_hint=None: "",
+    )
+
+    result = run_task_module.VECTRA_OT_start_backend().execute(context)
+
+    assert result == {"CANCELLED"}
+    assert scene.vectra_backend_status == "failed"
+    assert "could not find a repo checkout" in scene.vectra_status
+
+
+def test_panel_draw_exposes_start_backend_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bpy = _make_fake_bpy()
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    for module_name in (
+        "vectra.ui.panel",
+        "vectra.operators.run_task",
+    ):
+        sys.modules.pop(module_name, None)
+    panel_module = _reload_module("vectra.ui.panel")
+    monkeypatch.setattr(
+        panel_module.addon_loader,
+        "get_runtime_status",
+        lambda: SimpleNamespace(mode="development", source_path="/tmp/vectra", error=""),
+    )
+    monkeypatch.setattr(panel_module, "current_dev_source_path", lambda context=None: "/tmp/vectra")
+    monkeypatch.setattr(panel_module, "get_reload_block_reason", lambda: None)
+
+    class FakeLayout:
+        def __init__(self, operators: list[tuple[str, str]]) -> None:
+            self.operators = operators
+            self.enabled = True
+
+        def prop(self, *args, **kwargs):
+            del args, kwargs
+
+        def label(self, *args, **kwargs):
+            del args, kwargs
+
+        def box(self):
+            return self
+
+        def column(self):
+            return self
+
+        def operator(self, operator_id: str, text: str = ""):
+            self.operators.append((operator_id, text))
+
+    operators: list[tuple[str, str]] = []
+    panel = panel_module.VECTRA_PT_panel()
+    panel.layout = FakeLayout(operators)
+    scene = SimpleNamespace(
+        vectra_prompt="",
+        vectra_execution_mode="vectra-dev",
+        vectra_request_in_flight=False,
+        vectra_status="Idle",
+        vectra_phase="idle",
+        vectra_runtime_state="idle",
+        vectra_iteration=0,
+        vectra_pending_question="",
+        vectra_agent_transcript="",
+        vectra_backend_status="unknown",
+        vectra_backend_log_path="/tmp/vectra/.vectra/backend.log",
+    )
+
+    panel.draw(SimpleNamespace(scene=scene))
+
+    assert ("vectra.start_backend", "Start Backend") in operators
 
 
 def test_run_task_blocks_reload_while_worker_thread_is_active(
