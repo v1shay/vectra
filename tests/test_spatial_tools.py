@@ -6,7 +6,17 @@ import vectra.tools.floor_tools as floor_tools_module
 import vectra.tools.spatial_tools as spatial_tools_module
 from vectra.tools.floor_tools import EnsureFloorTool
 from vectra.tools.registry import ToolRegistry
-from vectra.tools.spatial import face_center, lowest_z, world_bounds
+from vectra.tools.spatial import (
+    all_face_centers,
+    floor_contact_record,
+    is_wall_like,
+    spatial_anchors,
+    spatial_metadata_for_object,
+    spatial_relations,
+    face_center,
+    lowest_z,
+    world_bounds,
+)
 from vectra.tools.spatial_tools import PlaceOnSurfaceTool
 
 
@@ -75,6 +85,54 @@ def test_world_bounds_accepts_iterable_blender_style_bound_box_corners() -> None
         "min": (-1.0, -1.0, -1.0),
         "max": (1.0, 1.0, 1.0),
     }
+
+
+def test_spatial_metadata_relations_and_anchors_are_deterministic() -> None:
+    floor = {
+        "name": "Floor",
+        "type": "MESH",
+        "bounds": {"min": [-4.0, -4.0, 0.0], "max": [4.0, 4.0, 0.0]},
+    }
+    wall = {
+        "name": "BackWall",
+        "type": "MESH",
+        "bounds": {"min": [-4.0, -4.0, 0.0], "max": [4.0, -3.8, 3.0]},
+    }
+    bed = {
+        "name": "Bed",
+        "type": "MESH",
+        "bounds": {"min": [-1.0, -3.8, 0.0], "max": [1.0, -2.0, 0.8]},
+    }
+    nightstand = {
+        "name": "Nightstand",
+        "type": "MESH",
+        "bounds": {"min": [1.0, -3.4, 0.0], "max": [1.8, -2.6, 0.8]},
+    }
+    lamp = {
+        "name": "Lamp",
+        "type": "MESH",
+        "bounds": {"min": [1.2, -3.2, 0.8], "max": [1.6, -2.8, 1.6]},
+    }
+    objects = [bed, floor, lamp, nightstand, wall]
+
+    bed_metadata = spatial_metadata_for_object(bed, floor_candidates=[floor])
+    relation_records = spatial_relations(objects)
+    anchor_records = spatial_anchors(objects)
+
+    assert bed_metadata["center"] == [0.0, -2.9, 0.4]
+    assert bed_metadata["half_extents"] == [1.0, 0.8999999999999999, 0.4]
+    assert bed_metadata["grounded"] is True
+    assert bed_metadata["floor_contact"] == {"object": "Floor", "gap": 0.0}
+    assert is_wall_like(wall) is True
+    assert floor_contact_record(lamp, [nightstand]) == {"object": "Nightstand", "gap": 0.0}
+    assert {"source": "Bed", "target": "BackWall", "relation": "against"} in relation_records
+    assert {"source": "Nightstand", "target": "Bed", "relation": "next_to"} in relation_records
+    assert {"source": "Lamp", "target": "Nightstand", "relation": "on"} in relation_records
+    assert relation_records == spatial_relations(list(reversed(objects)))
+    assert anchor_records == spatial_anchors(list(reversed(objects)))
+    assert "top" in all_face_centers(world_bounds(bed))
+    assert any(anchor["name"] == "BackWall.wall.inner" for anchor in anchor_records)
+    assert any(anchor["type"] == "scene_corner" for anchor in anchor_records)
 
 
 def test_tool_registry_discovers_spatial_phase_a_tools() -> None:
