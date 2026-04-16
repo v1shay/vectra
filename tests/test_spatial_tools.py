@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import vectra.tools.floor_tools as floor_tools_module
 import vectra.tools.spatial_tools as spatial_tools_module
+from vectra.tools.base import ToolValidationError
 from vectra.tools.floor_tools import EnsureFloorTool
 from vectra.tools.registry import ToolRegistry
 from vectra.tools.spatial import (
@@ -17,7 +20,7 @@ from vectra.tools.spatial import (
     lowest_z,
     world_bounds,
 )
-from vectra.tools.spatial_tools import PlaceOnSurfaceTool
+from vectra.tools.spatial_tools import PlaceAgainstTool, PlaceOnSurfaceTool, PlaceRelativeTool
 
 
 def _mesh(name: str, *, location: tuple[float, float, float], dimensions: tuple[float, float, float]) -> SimpleNamespace:
@@ -168,6 +171,103 @@ def test_place_on_surface_tool_grounds_target_on_reference_top(monkeypatch) -> N
     assert target.location == (0.0, 0.0, 1.0)
     assert result.outputs["placement_mode"] == "surface_contact"
     assert result.outputs["reference_object"] == "Floor"
+
+
+def test_place_against_preserves_grounded_axes_for_bed_against_wall(monkeypatch) -> None:
+    bed = _mesh("Bed", location=(0.0, 0.0, 0.5), dimensions=(2.0, 2.0, 1.0))
+    wall = _mesh("BackWall", location=(0.0, -3.0, 1.5), dimensions=(6.0, 0.2, 3.0))
+
+    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
+    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
+    monkeypatch.setattr(
+        spatial_tools_module,
+        "resolve_object",
+        lambda context, name: {"Bed": bed, "BackWall": wall}.get(name),
+    )
+
+    result = PlaceAgainstTool().execute(
+        context=SimpleNamespace(),
+        params={"target": "Bed", "reference": "BackWall", "side": "front", "offset": 0.0},
+    )
+
+    assert bed.location == (0.0, -1.9, 0.5)
+    assert result.outputs["placement_mode"] == "against_contact"
+    assert world_bounds(bed)["min"][1] == pytest.approx(world_bounds(wall)["max"][1])
+    assert world_bounds(bed)["min"][2] == pytest.approx(0.0)
+
+
+def test_place_relative_keeps_beside_object_grounded(monkeypatch) -> None:
+    bed = _mesh("Bed", location=(0.0, -1.9, 0.5), dimensions=(2.0, 2.0, 1.0))
+    nightstand = _mesh("Nightstand", location=(0.0, -1.9, 0.4), dimensions=(0.6, 0.8, 0.8))
+
+    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
+    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
+    monkeypatch.setattr(
+        spatial_tools_module,
+        "resolve_object",
+        lambda context, name: {"Bed": bed, "Nightstand": nightstand}.get(name),
+    )
+
+    PlaceRelativeTool().execute(
+        context=SimpleNamespace(),
+        params={"target": "Nightstand", "reference": "Bed", "relation": "right_of", "distance": 0.2},
+    )
+
+    assert nightstand.location == (1.5, -1.9, 0.4)
+    assert world_bounds(nightstand)["min"][0] == pytest.approx(world_bounds(bed)["max"][0] + 0.2)
+    assert world_bounds(nightstand)["min"][2] == pytest.approx(0.0)
+
+
+def test_place_on_surface_puts_lamp_on_nightstand(monkeypatch) -> None:
+    nightstand = _mesh("Nightstand", location=(1.5, -1.9, 0.4), dimensions=(0.6, 0.8, 0.8))
+    lamp = _mesh("Lamp", location=(0.0, 0.0, 0.3), dimensions=(0.3, 0.3, 0.6))
+
+    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
+    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
+    monkeypatch.setattr(
+        spatial_tools_module,
+        "resolve_object",
+        lambda context, name: {"Lamp": lamp, "Nightstand": nightstand}.get(name),
+    )
+
+    PlaceOnSurfaceTool().execute(
+        context=SimpleNamespace(),
+        params={"target": "Lamp", "reference": "Nightstand", "surface": "top"},
+    )
+
+    assert lamp.location == (1.5, -1.9, 1.1)
+    assert world_bounds(lamp)["min"][2] == pytest.approx(world_bounds(nightstand)["max"][2])
+
+
+def test_place_against_can_compose_corner_placement_without_scene_template(monkeypatch) -> None:
+    left_wall = _mesh("LeftWall", location=(-3.0, 0.0, 1.5), dimensions=(0.2, 6.0, 3.0))
+    back_wall = _mesh("BackWall", location=(0.0, -3.0, 1.5), dimensions=(6.0, 0.2, 3.0))
+    plant = _mesh("Plant", location=(-2.0, -2.0, 0.5), dimensions=(0.5, 0.5, 1.0))
+    objects = {"LeftWall": left_wall, "BackWall": back_wall, "Plant": plant}
+
+    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
+    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
+    monkeypatch.setattr(spatial_tools_module, "resolve_object", lambda context, name: objects.get(name))
+
+    tool = PlaceAgainstTool()
+    tool.execute(context=SimpleNamespace(), params={"target": "Plant", "reference": "LeftWall", "side": "right"})
+    tool.execute(context=SimpleNamespace(), params={"target": "Plant", "reference": "BackWall", "side": "front"})
+
+    assert plant.location == (-2.65, -2.65, 0.5)
+    assert world_bounds(plant)["min"][0] == pytest.approx(world_bounds(left_wall)["max"][0])
+    assert world_bounds(plant)["min"][1] == pytest.approx(world_bounds(back_wall)["max"][1])
+    assert world_bounds(plant)["min"][2] == pytest.approx(0.0)
+
+
+def test_spatial_tools_reject_invalid_relation_parameters() -> None:
+    with pytest.raises(ToolValidationError, match="'distance' must be finite"):
+        PlaceRelativeTool().validate_params(
+            {"target": "A", "reference": "B", "relation": "right_of", "distance": float("nan")}
+        )
+    with pytest.raises(ToolValidationError, match="'offset' must be greater than or equal to 0"):
+        PlaceAgainstTool().validate_params({"target": "A", "reference": "B", "side": "front", "offset": -0.1})
+    with pytest.raises(ToolValidationError, match="'target' must be a non-empty string"):
+        PlaceOnSurfaceTool().validate_params({"target": None, "reference": "B", "surface": "top"})
 
 
 def test_ensure_floor_normalizes_existing_floor_candidate(monkeypatch) -> None:
