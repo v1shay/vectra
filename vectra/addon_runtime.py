@@ -8,6 +8,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in plain Python test
 
 if bpy is not None:
     from .operators.run_task import (
+        VECTRA_OT_start_backend,
         VECTRA_OT_run_task,
         cleanup_request_state,
         get_reload_block_reason as _get_reload_block_reason,
@@ -16,6 +17,7 @@ if bpy is not None:
     from .ui.panel import VECTRA_PT_panel
 
     CLASSES = (
+        VECTRA_OT_start_backend,
         VECTRA_OT_run_task,
         VECTRA_PT_panel,
     )
@@ -39,6 +41,16 @@ if bpy is not None:
             name="Runtime State",
             description="Detailed runtime state from the Vectra backend",
             default="idle",
+        ),
+        "vectra_backend_status": lambda: bpy.props.StringProperty(
+            name="Backend Status",
+            description="Local managed Vectra backend health/start state",
+            default="unknown",
+        ),
+        "vectra_backend_log_path": lambda: bpy.props.StringProperty(
+            name="Backend Log Path",
+            description="Path to the local managed Vectra backend log",
+            default="",
         ),
         "vectra_request_in_flight": lambda: bpy.props.BoolProperty(
             name="Request In Flight",

@@ -15,7 +15,7 @@ from ..agent.reflection import summarize_scene_diff
 from ..addon_bootstrap import current_dev_source_path
 from ..bridge.client import BridgeClientError, create_agent_step, create_task
 from ..execution import ConsoleCodeExecutor, ExecutionEngine
-from ..runtime_service import ensure_local_backend
+from ..runtime_service import ensure_local_backend, managed_backend_log_path
 from ..utils.logging import get_vectra_logger, log_structured
 
 logger = get_vectra_logger("vectra.blender")
@@ -80,6 +80,19 @@ def _set_phase(scene: bpy.types.Scene, phase: str) -> None:
 def _set_runtime_state(scene: bpy.types.Scene, runtime_state: str) -> None:
     if hasattr(scene, "vectra_runtime_state"):
         scene.vectra_runtime_state = runtime_state
+
+
+def _set_backend_state(scene: bpy.types.Scene, status: str, log_path: str | None = None) -> None:
+    if hasattr(scene, "vectra_backend_status"):
+        scene.vectra_backend_status = status
+    if log_path is not None and hasattr(scene, "vectra_backend_log_path"):
+        scene.vectra_backend_log_path = log_path
+
+
+def _report_operator(operator: bpy.types.Operator, level: set[str], message: str) -> None:
+    report = getattr(operator, "report", None)
+    if callable(report):
+        report(level, message)
 
 
 def _append_transcript(scene: bpy.types.Scene, message: str | None) -> None:
@@ -695,6 +708,45 @@ def get_reload_block_reason() -> str | None:
     if _is_poll_timer_registered():
         return "Cannot reload Vectra while the request poll timer is still registered"
     return None
+
+
+class VECTRA_OT_start_backend(bpy.types.Operator):
+    bl_idname = "vectra.start_backend"
+    bl_label = "Start Backend"
+    bl_description = "Health-check and start the local managed Vectra backend"
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        scene = context.scene
+        if getattr(scene, "vectra_request_in_flight", False):
+            _report_operator(self, {"INFO"}, "Cannot start backend while a Vectra request is running")
+            return {"CANCELLED"}
+
+        repo_root_hint = current_dev_source_path(context)
+        initial_log_path = managed_backend_log_path(repo_root_hint)
+        _set_backend_state(scene, "starting", initial_log_path or "")
+        try:
+            ensure_local_backend(
+                base_url=DEFAULT_BASE_URL,
+                repo_root_hint=repo_root_hint,
+            )
+        except BridgeClientError as exc:
+            log_path = managed_backend_log_path(repo_root_hint) or initial_log_path or ""
+            _set_backend_state(scene, "failed", log_path)
+            scene.vectra_status = str(exc)
+            _report_operator(self, {"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:  # pragma: no cover - defensive Blender runtime guard
+            logger.exception("Unexpected Vectra backend startup failure")
+            log_path = managed_backend_log_path(repo_root_hint) or initial_log_path or ""
+            _set_backend_state(scene, "failed", log_path)
+            scene.vectra_status = f"Backend startup failed: {exc}"
+            _report_operator(self, {"ERROR"}, scene.vectra_status)
+            return {"CANCELLED"}
+
+        _set_backend_state(scene, "online", managed_backend_log_path(repo_root_hint) or initial_log_path or "")
+        scene.vectra_status = "Backend online"
+        _report_operator(self, {"INFO"}, "Vectra backend is online")
+        return {"FINISHED"}
 
 
 class VECTRA_OT_run_task(bpy.types.Operator):
