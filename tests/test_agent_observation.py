@@ -94,6 +94,7 @@ def test_build_scene_state_uses_world_bounds_for_spatial_observation(monkeypatch
         "min": [9.0, -3.0, 0.0],
         "max": [11.0, -1.0, 2.0],
     }
+    assert scene_state["objects"][0]["spatial"]["world_bounds"] == scene_state["objects"][0]["bounds"]
     assert scene_state["objects"][0]["spatial"]["center"] == [10.0, -2.0, 1.0]
 
 
