@@ -36,6 +36,13 @@ def test_create_primitive_rejects_invalid_scale() -> None:
         tool.validate_params({"type": "cube", "scale": {"x": 1}})
 
 
+def test_create_primitive_rejects_non_finite_location() -> None:
+    tool = CreatePrimitiveTool()
+
+    with pytest.raises(ToolValidationError, match="'location' values must be finite"):
+        tool.validate_params({"type": "cube", "location": [0.0, float("nan"), 0.0]})
+
+
 def test_create_primitive_accepts_rotation_euler_alias() -> None:
     tool = CreatePrimitiveTool()
 
