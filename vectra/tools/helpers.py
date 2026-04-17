@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 try:
@@ -19,9 +20,12 @@ def validate_vector3(value: Any, field_name: str) -> tuple[float, float, float]:
         if isinstance(component, bool):
             raise ToolValidationError(f"'{field_name}' values must be numeric")
         try:
-            normalized.append(float(component))
+            numeric_component = float(component)
         except (TypeError, ValueError) as exc:
             raise ToolValidationError(f"'{field_name}' values must be numeric") from exc
+        if not math.isfinite(numeric_component):
+            raise ToolValidationError(f"'{field_name}' values must be finite")
+        normalized.append(numeric_component)
     return (normalized[0], normalized[1], normalized[2])
 
 
