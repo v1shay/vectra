@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 from typing import Any
 
@@ -151,6 +152,52 @@ def _drop_none_values(params: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in params.items() if value is not None}
 
 
+def _is_action_ref(value: Any) -> bool:
+    return isinstance(value, Mapping) and set(value.keys()) == {"$ref"} and isinstance(value.get("$ref"), str)
+
+
+def _contains_action_ref(value: Any) -> bool:
+    if _is_action_ref(value):
+        return True
+    if isinstance(value, Mapping):
+        return any(_contains_action_ref(nested_value) for nested_value in value.values())
+    if isinstance(value, list):
+        return any(_contains_action_ref(item) for item in value)
+    return False
+
+
+def _refs_as_validation_placeholders(value: Any) -> Any:
+    if _is_action_ref(value):
+        return "__pending_action_ref__"
+    if isinstance(value, Mapping):
+        return {
+            key: _refs_as_validation_placeholders(nested_value)
+            for key, nested_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_refs_as_validation_placeholders(item) for item in value]
+    return value
+
+
+def _compact_spatial_anchors(scene_state: dict[str, Any]) -> str:
+    anchors = scene_state.get("spatial_anchors", [])
+    if not isinstance(anchors, list) or not anchors:
+        return "none"
+    compact: list[str] = []
+    for anchor in anchors[:32]:
+        if not isinstance(anchor, dict):
+            continue
+        name = anchor.get("name")
+        anchor_type = anchor.get("type")
+        location = anchor.get("location")
+        face = anchor.get("face")
+        if not isinstance(name, str):
+            continue
+        suffix = f" face={face}" if isinstance(face, str) and face else ""
+        compact.append(f"{name} type={anchor_type} location={location}{suffix}")
+    return "; ".join(compact) if compact else "none"
+
+
 def _compact_scene_state(scene_state: dict[str, Any]) -> str:
     objects = scene_state.get("objects", [])
     compact_objects: list[str] = []
@@ -198,6 +245,7 @@ def _compact_scene_state(scene_state: dict[str, Any]) -> str:
         f"Current frame: {scene_state.get('current_frame')}\n"
         f"Scene centroid: {scene_state.get('scene_centroid')}\n"
         f"Scene bounds: {scene_state.get('scene_bounds')}\n"
+        f"Spatial anchors: {_compact_spatial_anchors(scene_state)}\n"
         f"Lights: {lights}\n"
         f"Groups: {groups}\n"
         f"Objects:\n- " + "\n- ".join(compact_objects)
@@ -209,6 +257,7 @@ def _compact_scene_state(scene_state: dict[str, Any]) -> str:
             f"Current frame: {scene_state.get('current_frame')}\n"
             f"Scene centroid: {scene_state.get('scene_centroid')}\n"
             f"Scene bounds: {scene_state.get('scene_bounds')}\n"
+            f"Spatial anchors: {_compact_spatial_anchors(scene_state)}\n"
             f"Lights: {lights}\n"
             f"Groups: {groups}\n"
             "Objects: none"
@@ -292,6 +341,11 @@ def _build_director_prompt(
         f"Recent history:\n{_history_summary(context.history)}\n\n"
         f"Memory:\n{_memory_summary(context.memory_results)}\n\n"
         f"Screenshot:\n{json.dumps({'available': screenshot.get('available', False), 'path': screenshot.get('path'), 'reason': screenshot.get('reason')}, indent=2)}\n\n"
+        "Spatial tool guidance:\n"
+        "- Use object.place_on_surface for contact such as one object resting on another.\n"
+        "- Use object.place_against, object.place_relative, object.align_to, or object.place_at_anchor for exact geometry-derived placement.\n"
+        "- Use exact object names for objects created earlier in the same batch; Vectra will convert them into action references.\n"
+        "- Do not use unsupported camera.keyframe or light.keyframe tools; use object.keyframe with a camera or light target.\n\n"
         "Tool definitions are supplied separately when the provider supports structured tools."
     )
 
@@ -523,11 +577,14 @@ class DirectorLoop:
                 )
                 continue
             try:
-                normalized_params = tool.validate_params(params if isinstance(params, dict) else {})
+                raw_params = params if isinstance(params, dict) else {}
+                has_action_ref = _contains_action_ref(raw_params)
+                validation_params = _refs_as_validation_placeholders(raw_params) if has_action_ref else raw_params
+                normalized_params = tool.validate_params(validation_params)
             except ToolValidationError as exc:
                 issues.append(ToolCallValidationIssue(tool_name=tool_name, reason=str(exc)))
                 continue
-            validated_actions.append({**action, "params": normalized_params})
+            validated_actions.append({**action, "params": raw_params if has_action_ref else normalized_params})
 
         return validated_actions, issues
 
@@ -547,8 +604,9 @@ class DirectorLoop:
         context: DirectorContext,
         *,
         step_index: int,
+        pending_object_refs: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], list[AssumptionRecord], dict[str, Any], str | None]:
-        resolver = ReferenceResolver(context)
+        resolver = ReferenceResolver(context, pending_object_refs=pending_object_refs)
         assumptions: list[AssumptionRecord] = []
         metadata: dict[str, Any] = {
             "chosen_tool": tool_call.name,
@@ -639,6 +697,19 @@ class DirectorLoop:
             params = dict(args)
             params["target"] = target_result.value
             params["reference"] = reference_result.value
+            return (
+                [{"action_id": action_id, "tool": tool_call.name, "params": _drop_none_values(params)}],
+                assumptions,
+                metadata,
+                None,
+            )
+
+        if tool_call.name == "object.place_at_anchor":
+            target_result = resolver.resolve_required_target(args.get("target"), "target")
+            assumptions.extend(target_result.assumptions)
+            metadata["reference_anchor"] = args.get("anchor") or target_result.metadata.get("anchor")
+            params = dict(args)
+            params["target"] = target_result.value
             return (
                 [{"action_id": action_id, "tool": tool_call.name, "params": _drop_none_values(params)}],
                 assumptions,
@@ -758,12 +829,14 @@ class DirectorLoop:
         reference_anchors: list[str | None] = []
         action_families: list[str] = []
         code: str | None = None
+        pending_object_refs: dict[str, Any] = {}
 
         for step_index, tool_call in enumerate(tool_calls[:_BATCH_LIMIT], start=1):
             resolved_actions, resolved_assumptions, metadata, resolved_code = self._resolve_single_tool_call(
                 tool_call,
                 context,
                 step_index=step_index,
+                pending_object_refs=pending_object_refs,
             )
             actions.extend(resolved_actions)
             assumptions.extend(resolved_assumptions)
@@ -772,6 +845,10 @@ class DirectorLoop:
                 action_families.append(metadata["action_family"])
             if resolved_code:
                 code = resolved_code
+            if tool_call.name == "mesh.create_primitive":
+                raw_name = tool_call.arguments.get("name")
+                if isinstance(raw_name, str) and raw_name.strip():
+                    pending_object_refs[raw_name.strip()] = {"$ref": f"step_{step_index}.object_name"}
 
         return (
             actions,
