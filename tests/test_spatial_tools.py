@@ -6,7 +6,7 @@ import pytest
 
 import vectra.tools.floor_tools as floor_tools_module
 import vectra.tools.spatial_tools as spatial_tools_module
-from vectra.tools.base import ToolValidationError
+from vectra.tools.base import ToolExecutionError, ToolValidationError
 from vectra.tools.floor_tools import EnsureFloorTool
 from vectra.tools.registry import ToolRegistry
 from vectra.tools.spatial import (
@@ -20,7 +20,7 @@ from vectra.tools.spatial import (
     lowest_z,
     world_bounds,
 )
-from vectra.tools.spatial_tools import PlaceAgainstTool, PlaceOnSurfaceTool, PlaceRelativeTool
+from vectra.tools.spatial_tools import PlaceAgainstTool, PlaceAtAnchorTool, PlaceOnSurfaceTool, PlaceRelativeTool
 
 
 def _mesh(name: str, *, location: tuple[float, float, float], dimensions: tuple[float, float, float]) -> SimpleNamespace:
@@ -33,6 +33,16 @@ def _mesh(name: str, *, location: tuple[float, float, float], dimensions: tuple[
         matrix_world=None,
         scale=None,
     )
+
+
+def _context(*objects: SimpleNamespace) -> SimpleNamespace:
+    return SimpleNamespace(scene=SimpleNamespace(objects=list(objects)))
+
+
+def _patch_spatial_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
+    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
+    monkeypatch.setattr(spatial_tools_module, "scene_objects", lambda context: list(context.scene.objects))
 
 
 class _CornerVector:
@@ -148,6 +158,7 @@ def test_tool_registry_discovers_spatial_phase_a_tools() -> None:
     assert "object.place_against" in discovered_tools
     assert "object.place_relative" in discovered_tools
     assert "object.align_to" in discovered_tools
+    assert "object.place_at_anchor" in discovered_tools
     assert "scene.ensure_floor" in discovered_tools
 
 
@@ -155,16 +166,10 @@ def test_place_on_surface_tool_grounds_target_on_reference_top(monkeypatch) -> N
     target = _mesh("Target", location=(0.0, 0.0, 0.0), dimensions=(2.0, 2.0, 2.0))
     reference = _mesh("Floor", location=(0.0, 0.0, 0.0), dimensions=(8.0, 8.0, 0.0))
 
-    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
-    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
-    monkeypatch.setattr(
-        spatial_tools_module,
-        "resolve_object",
-        lambda context, name: {"Target": target, "Floor": reference}.get(name),
-    )
+    _patch_spatial_runtime(monkeypatch)
 
     result = PlaceOnSurfaceTool().execute(
-        context=SimpleNamespace(),
+        context=_context(target, reference),
         params={"target": "Target", "reference": "Floor", "surface": "top", "offset": 0.0},
     )
 
@@ -177,16 +182,10 @@ def test_place_against_preserves_grounded_axes_for_bed_against_wall(monkeypatch)
     bed = _mesh("Bed", location=(0.0, 0.0, 0.5), dimensions=(2.0, 2.0, 1.0))
     wall = _mesh("BackWall", location=(0.0, -3.0, 1.5), dimensions=(6.0, 0.2, 3.0))
 
-    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
-    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
-    monkeypatch.setattr(
-        spatial_tools_module,
-        "resolve_object",
-        lambda context, name: {"Bed": bed, "BackWall": wall}.get(name),
-    )
+    _patch_spatial_runtime(monkeypatch)
 
     result = PlaceAgainstTool().execute(
-        context=SimpleNamespace(),
+        context=_context(bed, wall),
         params={"target": "Bed", "reference": "BackWall", "side": "front", "offset": 0.0},
     )
 
@@ -200,16 +199,10 @@ def test_place_relative_keeps_beside_object_grounded(monkeypatch) -> None:
     bed = _mesh("Bed", location=(0.0, -1.9, 0.5), dimensions=(2.0, 2.0, 1.0))
     nightstand = _mesh("Nightstand", location=(0.0, -1.9, 0.4), dimensions=(0.6, 0.8, 0.8))
 
-    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
-    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
-    monkeypatch.setattr(
-        spatial_tools_module,
-        "resolve_object",
-        lambda context, name: {"Bed": bed, "Nightstand": nightstand}.get(name),
-    )
+    _patch_spatial_runtime(monkeypatch)
 
     PlaceRelativeTool().execute(
-        context=SimpleNamespace(),
+        context=_context(bed, nightstand),
         params={"target": "Nightstand", "reference": "Bed", "relation": "right_of", "distance": 0.2},
     )
 
@@ -222,16 +215,10 @@ def test_place_on_surface_puts_lamp_on_nightstand(monkeypatch) -> None:
     nightstand = _mesh("Nightstand", location=(1.5, -1.9, 0.4), dimensions=(0.6, 0.8, 0.8))
     lamp = _mesh("Lamp", location=(0.0, 0.0, 0.3), dimensions=(0.3, 0.3, 0.6))
 
-    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
-    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
-    monkeypatch.setattr(
-        spatial_tools_module,
-        "resolve_object",
-        lambda context, name: {"Lamp": lamp, "Nightstand": nightstand}.get(name),
-    )
+    _patch_spatial_runtime(monkeypatch)
 
     PlaceOnSurfaceTool().execute(
-        context=SimpleNamespace(),
+        context=_context(lamp, nightstand),
         params={"target": "Lamp", "reference": "Nightstand", "surface": "top"},
     )
 
@@ -243,15 +230,12 @@ def test_place_against_can_compose_corner_placement_without_scene_template(monke
     left_wall = _mesh("LeftWall", location=(-3.0, 0.0, 1.5), dimensions=(0.2, 6.0, 3.0))
     back_wall = _mesh("BackWall", location=(0.0, -3.0, 1.5), dimensions=(6.0, 0.2, 3.0))
     plant = _mesh("Plant", location=(-2.0, -2.0, 0.5), dimensions=(0.5, 0.5, 1.0))
-    objects = {"LeftWall": left_wall, "BackWall": back_wall, "Plant": plant}
-
-    monkeypatch.setattr(spatial_tools_module, "bpy", SimpleNamespace())
-    monkeypatch.setattr(spatial_tools_module, "ensure_object_mode", lambda context: None)
-    monkeypatch.setattr(spatial_tools_module, "resolve_object", lambda context, name: objects.get(name))
+    context = _context(left_wall, back_wall, plant)
+    _patch_spatial_runtime(monkeypatch)
 
     tool = PlaceAgainstTool()
-    tool.execute(context=SimpleNamespace(), params={"target": "Plant", "reference": "LeftWall", "side": "right"})
-    tool.execute(context=SimpleNamespace(), params={"target": "Plant", "reference": "BackWall", "side": "front"})
+    tool.execute(context=context, params={"target": "Plant", "reference": "LeftWall", "side": "right"})
+    tool.execute(context=context, params={"target": "Plant", "reference": "BackWall", "side": "front"})
 
     assert plant.location == (-2.65, -2.65, 0.5)
     assert world_bounds(plant)["min"][0] == pytest.approx(world_bounds(left_wall)["max"][0])
@@ -268,6 +252,32 @@ def test_spatial_tools_reject_invalid_relation_parameters() -> None:
         PlaceAgainstTool().validate_params({"target": "A", "reference": "B", "side": "front", "offset": -0.1})
     with pytest.raises(ToolValidationError, match="'target' must be a non-empty string"):
         PlaceOnSurfaceTool().validate_params({"target": None, "reference": "B", "surface": "top"})
+
+
+def test_spatial_tools_fail_visibly_without_reference_fallback(monkeypatch) -> None:
+    cube = _mesh("Cube", location=(0.0, 0.0, 1.0), dimensions=(2.0, 2.0, 2.0))
+    _patch_spatial_runtime(monkeypatch)
+
+    with pytest.raises(ToolExecutionError, match="could not resolve object 'Missing'"):
+        PlaceOnSurfaceTool().execute(
+            context=_context(cube),
+            params={"target": "Cube", "reference": "Missing", "surface": "top"},
+        )
+
+
+def test_place_at_anchor_uses_derived_floor_corner_without_scene_template(monkeypatch) -> None:
+    floor = _mesh("Floor", location=(0.0, 0.0, 0.0), dimensions=(6.0, 6.0, 0.0))
+    plant = _mesh("Plant", location=(0.0, 0.0, 0.5), dimensions=(0.5, 0.5, 1.0))
+    _patch_spatial_runtime(monkeypatch)
+
+    result = PlaceAtAnchorTool().execute(
+        context=_context(floor, plant),
+        params={"target": "Plant", "anchor": "Floor.floor.corner.left.back"},
+    )
+
+    assert plant.location == (-2.75, -2.75, 0.5)
+    assert result.outputs["placement_mode"] == "anchor_placement"
+    assert result.outputs["anchor"] == "Floor.floor.corner.left.back"
 
 
 def test_ensure_floor_normalizes_existing_floor_candidate(monkeypatch) -> None:
