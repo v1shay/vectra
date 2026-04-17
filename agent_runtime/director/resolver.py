@@ -5,6 +5,7 @@ from typing import Any
 
 from vectra.tools.spatial import (
     bounds_half_extents,
+    coerce_vector3,
     find_floor_object,
     object_type,
     place_on_surface_location,
@@ -70,10 +71,10 @@ def _group_by_name(scene_state: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def _vector3(value: Any) -> list[float] | None:
-    if not isinstance(value, list) or len(value) != 3:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
         return None
     try:
-        return [float(value[0]), float(value[1]), float(value[2])]
+        return [float(component) for component in coerce_vector3(value)]
     except (TypeError, ValueError):
         return None
 
@@ -153,11 +154,16 @@ class ResolutionResult:
 
 
 class ReferenceResolver:
-    def __init__(self, context: DirectorContext) -> None:
+    def __init__(self, context: DirectorContext, *, pending_object_refs: dict[str, Any] | None = None) -> None:
         self.context = context
         self._scene_map = _object_by_name(context.scene_state)
         self._group_map = _group_by_name(context.scene_state)
         self._mesh_objects = _mesh_objects(context.scene_state)
+        self._pending_object_refs = {
+            key: value
+            for key, value in (pending_object_refs or {}).items()
+            if isinstance(key, str) and key.strip()
+        }
         floor_candidate = find_floor_object(self._mesh_objects)
         self._floor_name = str(floor_candidate.get("name", "")).strip() if isinstance(floor_candidate, dict) else None
 
@@ -166,6 +172,10 @@ class ReferenceResolver:
         metadata: dict[str, Any] = {}
         if isinstance(raw_target, str) and raw_target.strip():
             stripped = raw_target.strip()
+            pending = self._pending_object_refs.get(stripped)
+            if pending is not None:
+                metadata["anchor"] = f"pending:{stripped}"
+                return ResolutionResult(pending, assumptions, metadata)
             exact = self._scene_map.get(stripped)
             if exact is not None:
                 metadata["anchor"] = stripped
@@ -196,6 +206,17 @@ class ReferenceResolver:
                         )
                         metadata["anchor"] = name
                         return ResolutionResult(name, assumptions, metadata)
+                for name, pending_ref in self._pending_object_refs.items():
+                    if lowered == name.lower() or lowered in name.lower():
+                        assumptions.append(
+                            AssumptionRecord(
+                                key="target",
+                                value=pending_ref,
+                                reason=f"Resolved vague reference '{stripped}' to an object created earlier in this batch.",
+                            )
+                        )
+                        metadata["anchor"] = f"pending:{name}"
+                        return ResolutionResult(pending_ref, assumptions, metadata)
 
         active_object = _active_object_name(self.context.scene_state)
         if active_object:
@@ -250,6 +271,10 @@ class ReferenceResolver:
         metadata: dict[str, Any] = {}
         if isinstance(raw_target, str) and raw_target.strip():
             stripped = raw_target.strip()
+            pending = self._pending_object_refs.get(stripped)
+            if pending is not None:
+                metadata["anchor"] = f"pending:{stripped}"
+                return ResolutionResult(pending, assumptions, metadata)
             exact = self._scene_map.get(stripped)
             if exact is not None:
                 metadata["anchor"] = stripped
@@ -278,6 +303,17 @@ class ReferenceResolver:
                         )
                         metadata["anchor"] = name
                         return ResolutionResult(name, assumptions, metadata)
+                for name, pending_ref in self._pending_object_refs.items():
+                    if lowered == name.lower() or lowered in name.lower():
+                        assumptions.append(
+                            AssumptionRecord(
+                                key=field_name,
+                                value=pending_ref,
+                                reason=f"Resolved required spatial relation reference '{stripped}' to an object created earlier in this batch.",
+                            )
+                        )
+                        metadata["anchor"] = f"pending:{name}"
+                        return ResolutionResult(pending_ref, assumptions, metadata)
 
         assumptions.append(
             AssumptionRecord(
@@ -412,13 +448,17 @@ class ReferenceResolver:
     def resolve_objects(self, raw_objects: Any) -> ResolutionResult:
         assumptions: list[AssumptionRecord] = []
         metadata: dict[str, Any] = {}
-        resolved: list[str] = []
+        resolved: list[Any] = []
         if isinstance(raw_objects, list):
             for item in raw_objects:
                 target = self.resolve_target(item)
-                if isinstance(target.value, str):
+                if isinstance(target.value, (str, dict)):
                     resolved.append(target.value)
                     assumptions.extend(target.assumptions)
+        elif isinstance(raw_objects, str) and raw_objects.strip() in self._pending_object_refs:
+            name = raw_objects.strip()
+            metadata["anchor"] = f"pending:{name}"
+            return ResolutionResult([self._pending_object_refs[name]], assumptions, metadata)
         elif isinstance(raw_objects, str) and raw_objects.strip() in self._group_map:
             group_name = raw_objects.strip()
             assumptions.append(
