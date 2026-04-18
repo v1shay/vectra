@@ -1,8 +1,0 @@
-pytest
-pytest-asyncio
-pydantic
-fastapi
-uvicorn
-httpx
-sqlalchemy[asyncio]
-aiosqlite
