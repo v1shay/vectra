@@ -7,13 +7,14 @@ from typing import Any
 
 from .normalization import normalize_action_params
 from ..tools.base import ToolExecutionError, ToolValidationError
-from ..tools.registry import ToolRegistry, ToolRegistryError, get_default_registry
+from ..tools.registry import ToolNotFoundError, ToolRegistry, ToolRegistryError, get_default_registry
 from ..utils.logging import (
     get_vectra_logger,
     log_action_failure,
     log_action_start,
     log_action_success,
     log_execution_report,
+    log_structured,
 )
 
 
@@ -40,6 +41,21 @@ class ActionExecutionResult:
     outputs: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     repairs: list[str] = field(default_factory=list)
+    status: str = ""
+    result: dict[str, Any] = field(default_factory=dict)
+    error_type: str | None = None
+    message: str = ""
+    missing_params: list[str] = field(default_factory=list)
+    invalid_params: list[str] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.status:
+            self.status = "success" if self.success else "error"
+        if self.success and not self.result:
+            self.result = dict(self.outputs)
+        if not self.success and self.error and not self.message:
+            self.message = self.error
 
 
 @dataclass
@@ -61,9 +77,22 @@ class ExecutionEngine:
         self.logger = logger or get_vectra_logger("vectra.execution")
         self._transient_failures_seen: set[str] = set()
 
-    def run(self, context: Any, actions: Sequence[dict[str, Any]]) -> ExecutionReport:
+    def run(self, context: Any, actions: Any) -> ExecutionReport:
         if not isinstance(actions, Sequence) or isinstance(actions, (str, bytes, bytearray)):
-            raise ActionValidationError("Actions must be a sequence")
+            result = self._error_result(
+                action_id=None,
+                tool="<invalid>",
+                error_type="action_validation_failure",
+                message="Actions must be a sequence",
+                details={"received_type": type(actions).__name__},
+            )
+            report = ExecutionReport(
+                success=False,
+                results=[result],
+                message="Action failed: <invalid> - Actions must be a sequence",
+            )
+            log_execution_report(self.logger, report)
+            return report
 
         results: list[ActionExecutionResult] = []
         outputs_by_action: dict[str, dict[str, Any]] = {}
@@ -71,86 +100,27 @@ class ExecutionEngine:
         report_repairs: list[str] = []
 
         for index, raw_action in enumerate(actions):
-            action_id = self._extract_action_id(raw_action)
-            tool_name = self._extract_tool_name(raw_action)
-
-            try:
-                normalized_action = self._normalize_action(raw_action, index, seen_action_ids)
-                resolved_params = self._resolve_refs(normalized_action.params, outputs_by_action)
-                tool = self.registry.get(normalized_action.tool)
-                normalized_params = normalize_action_params(tool, resolved_params)
-                repaired_messages = [repair.reason for repair in normalized_params.repairs]
-                report_repairs.extend(repaired_messages)
-                validated_params = tool.validate_params(normalized_params.params)
-                self._maybe_inject_transient_failure(normalized_action.tool)
-
-                log_action_start(
-                    self.logger,
-                    normalized_action.action_id,
-                    normalized_action.tool,
-                    validated_params,
-                )
-                tool_result = tool.execute(context, validated_params)
-                outputs = dict(tool_result.outputs)
-                results.append(
-                    ActionExecutionResult(
-                        action_id=normalized_action.action_id,
-                        tool=normalized_action.tool,
-                        success=True,
-                        outputs=outputs,
-                        repairs=repaired_messages,
-                    )
-                )
-                if normalized_action.action_id is not None:
-                    outputs_by_action[normalized_action.action_id] = outputs
-                log_action_success(
-                    self.logger,
-                    normalized_action.action_id,
-                    normalized_action.tool,
-                    outputs,
-                )
-            except (ActionValidationError, ReferenceResolutionError, ToolRegistryError, ToolValidationError, ToolExecutionError) as exc:
-                message = str(exc)
-                log_action_failure(self.logger, action_id, tool_name, message)
-                results.append(
-                    ActionExecutionResult(
-                        action_id=action_id,
-                        tool=tool_name,
-                        success=False,
-                        error=message,
-                        repairs=report_repairs,
-                    )
-                )
+            result = self.execute_action(
+                context,
+                raw_action,
+                index=index,
+                outputs_by_action=outputs_by_action,
+                seen_action_ids=seen_action_ids,
+            )
+            results.append(result)
+            report_repairs.extend(result.repairs)
+            if not result.success:
                 report = ExecutionReport(
                     success=False,
                     results=results,
-                    failed_action_id=action_id,
-                    message=f"Action failed: {tool_name} - {message}",
+                    failed_action_id=result.action_id,
+                    message=f"Action failed: {result.tool} - {result.message or result.error or 'Unknown error'}",
                     repairs=report_repairs,
                 )
                 log_execution_report(self.logger, report)
                 return report
-            except Exception as exc:  # pragma: no cover - hard guard for Blender runtime
-                message = f"Unexpected execution error: {exc}"
-                log_action_failure(self.logger, action_id, tool_name, message)
-                results.append(
-                    ActionExecutionResult(
-                        action_id=action_id,
-                        tool=tool_name,
-                        success=False,
-                        error=message,
-                        repairs=report_repairs,
-                    )
-                )
-                report = ExecutionReport(
-                    success=False,
-                    results=results,
-                    failed_action_id=action_id,
-                    message=f"Action failed: {tool_name} - {message}",
-                    repairs=report_repairs,
-                )
-                log_execution_report(self.logger, report)
-                return report
+            if result.action_id is not None:
+                outputs_by_action[result.action_id] = dict(result.outputs)
 
         success_message = (
             "No actions to execute"
@@ -160,6 +130,127 @@ class ExecutionEngine:
         report = ExecutionReport(success=True, results=results, message=success_message, repairs=report_repairs)
         log_execution_report(self.logger, report)
         return report
+
+    def execute_action(
+        self,
+        context: Any,
+        action: Any,
+        *,
+        index: int = 0,
+        outputs_by_action: dict[str, dict[str, Any]] | None = None,
+        seen_action_ids: set[str] | None = None,
+    ) -> ActionExecutionResult:
+        outputs = outputs_by_action if outputs_by_action is not None else {}
+        seen_ids = seen_action_ids if seen_action_ids is not None else set()
+        action_id = self._extract_action_id(action)
+        tool_name = self._extract_tool_name(action)
+        repaired_messages: list[str] = []
+
+        try:
+            normalized_action = self._normalize_action(action, index, seen_ids)
+            tool_name = normalized_action.tool
+            action_id = normalized_action.action_id
+            resolved_params = self._resolve_refs(normalized_action.params, outputs)
+            tool = self.registry.get(normalized_action.tool)
+            repaired_params, auto_repairs = self._apply_auto_repairs(
+                context,
+                normalized_action.tool,
+                resolved_params,
+                normalized_action.action_id,
+            )
+            repaired_messages.extend(auto_repairs)
+            normalized_params = normalize_action_params(tool, repaired_params)
+            repaired_messages.extend(repair.reason for repair in normalized_params.repairs)
+            validated_params = tool.validate_params(normalized_params.params)
+            self._maybe_inject_transient_failure(normalized_action.tool)
+
+            log_action_start(
+                self.logger,
+                normalized_action.action_id,
+                normalized_action.tool,
+                validated_params,
+            )
+            tool_result = tool.execute(context, validated_params)
+            action_outputs = dict(tool_result.outputs)
+            log_action_success(
+                self.logger,
+                normalized_action.action_id,
+                normalized_action.tool,
+                action_outputs,
+            )
+            if normalized_action.action_id is not None and outputs_by_action is not None:
+                outputs_by_action[normalized_action.action_id] = action_outputs
+            return ActionExecutionResult(
+                action_id=normalized_action.action_id,
+                tool=normalized_action.tool,
+                success=True,
+                outputs=action_outputs,
+                repairs=repaired_messages,
+                status="success",
+                result=action_outputs,
+                message=tool_result.message,
+            )
+        except ActionValidationError as exc:
+            return self._error_result(
+                action_id=action_id,
+                tool=tool_name,
+                error_type="action_validation_failure",
+                message=str(exc),
+                repairs=repaired_messages,
+            )
+        except ReferenceResolutionError as exc:
+            return self._error_result(
+                action_id=action_id,
+                tool=tool_name,
+                error_type="reference_resolution_failure",
+                message=str(exc),
+                repairs=repaired_messages,
+            )
+        except ToolNotFoundError as exc:
+            return self._error_result(
+                action_id=action_id,
+                tool=tool_name,
+                error_type="unknown_tool",
+                message=str(exc),
+                repairs=repaired_messages,
+                details={"available_tools": self.registry.list_tools()},
+            )
+        except ToolValidationError as exc:
+            return self._error_result(
+                action_id=action_id,
+                tool=tool_name,
+                error_type="tool_validation_failure",
+                message=str(exc),
+                repairs=repaired_messages,
+                missing_params=getattr(exc, "missing_params", []),
+                invalid_params=getattr(exc, "invalid_params", []),
+                details=getattr(exc, "details", {}),
+            )
+        except ToolExecutionError as exc:
+            return self._error_result(
+                action_id=action_id,
+                tool=tool_name,
+                error_type="tool_execution_failure",
+                message=str(exc),
+                repairs=repaired_messages,
+            )
+        except ToolRegistryError as exc:
+            return self._error_result(
+                action_id=action_id,
+                tool=tool_name,
+                error_type="unknown_tool",
+                message=str(exc),
+                repairs=repaired_messages,
+            )
+        except Exception as exc:  # pragma: no cover - hard guard for Blender runtime
+            return self._error_result(
+                action_id=action_id,
+                tool=tool_name,
+                error_type="unexpected_execution_error",
+                message=f"Unexpected execution error: {exc}",
+                repairs=repaired_messages,
+                details={"exception_type": type(exc).__name__},
+            )
 
     def _maybe_inject_transient_failure(self, tool_name: str) -> None:
         configured = os.getenv("VECTRA_AUDIT_INJECT_TRANSIENT_FAILURE", "").strip()
@@ -185,6 +276,99 @@ class ExecutionEngine:
             if isinstance(tool_name, str):
                 return tool_name
         return "<invalid>"
+
+    def _error_result(
+        self,
+        *,
+        action_id: str | None,
+        tool: str,
+        error_type: str,
+        message: str,
+        repairs: list[str] | None = None,
+        missing_params: list[str] | None = None,
+        invalid_params: list[str] | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> ActionExecutionResult:
+        structured_details = dict(details or {})
+        result = ActionExecutionResult(
+            action_id=action_id,
+            tool=tool,
+            success=False,
+            error=message,
+            repairs=list(repairs or []),
+            status="error",
+            error_type=error_type,
+            message=message,
+            missing_params=list(missing_params or []),
+            invalid_params=list(invalid_params or []),
+            details=structured_details,
+        )
+        log_action_failure(self.logger, action_id, tool, message)
+        log_event = "tool_validation_failure" if error_type == "tool_validation_failure" else "tool_execution_error"
+        log_structured(
+            self.logger,
+            log_event,
+            {
+                "action_id": action_id,
+                "tool": tool,
+                "error_type": error_type,
+                "message": message,
+                "missing_params": result.missing_params,
+                "invalid_params": result.invalid_params,
+                "details": structured_details,
+            },
+            level="warning" if error_type in {"action_validation_failure", "reference_resolution_failure", "tool_validation_failure", "unknown_tool"} else "error",
+        )
+        return result
+
+    def _apply_auto_repairs(
+        self,
+        context: Any,
+        tool_name: str,
+        params: Mapping[str, Any],
+        action_id: str | None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        repaired = dict(params)
+        repairs: list[str] = []
+        if tool_name != "object.place_on_surface":
+            return repaired, repairs
+        if "reference" in repaired and repaired["reference"] is not None:
+            return repaired, repairs
+
+        floor_name = self._exact_floor_name(context)
+        if floor_name is None:
+            return repaired, repairs
+
+        repaired["reference"] = floor_name
+        reason = f"Auto-filled missing reference with exact floor object '{floor_name}'"
+        repairs.append(reason)
+        log_structured(
+            self.logger,
+            "tool_auto_repair",
+            {
+                "action_id": action_id,
+                "tool": tool_name,
+                "field": "reference",
+                "value": floor_name,
+                "reason": reason,
+            },
+        )
+        return repaired, repairs
+
+    @staticmethod
+    def _exact_floor_name(context: Any) -> str | None:
+        scene = getattr(context, "scene", None)
+        objects = getattr(scene, "objects", None)
+        if objects is None:
+            return None
+        floor_names = [
+            name
+            for obj in list(objects)
+            if isinstance((name := getattr(obj, "name", None)), str) and name.lower() == "floor"
+        ]
+        if len(floor_names) == 1:
+            return floor_names[0]
+        return None
 
     def _normalize_action(
         self,
@@ -244,3 +428,13 @@ class ExecutionEngine:
                 raise ReferenceResolutionError(f"Reference '{raw_ref}' could not be resolved")
             current = current[part]
         return current
+
+
+def execute_action(
+    action: Any,
+    *,
+    context: Any,
+    registry: ToolRegistry | None = None,
+    logger: Any = None,
+) -> ActionExecutionResult:
+    return ExecutionEngine(registry=registry, logger=logger).execute_action(context, action)
