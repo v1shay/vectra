@@ -15,6 +15,25 @@ class FakeContext:
     transforms: list[dict[str, object]] = field(default_factory=list)
 
 
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, object]] = []
+
+    def info(self, message: str, *args: object) -> None:
+        self._record("info", message, *args)
+
+    def warning(self, message: str, *args: object) -> None:
+        self._record("warning", message, *args)
+
+    def error(self, message: str, *args: object) -> None:
+        self._record("error", message, *args)
+
+    def _record(self, level: str, message: str, *args: object) -> None:
+        event = str(args[0]) if args else message
+        payload = args[1] if len(args) > 1 else {}
+        self.records.append((level, event, payload))
+
+
 class FakeCreatePrimitiveTool(BaseTool):
     name = "mesh.create_primitive"
     description = "Fake create primitive tool"
@@ -129,6 +148,23 @@ class RuntimeErrorTool(BaseTool):
         raise RuntimeError("Unexpected boom")
 
 
+class FakeSchemaTool(BaseTool):
+    name = "object.schema"
+    input_schema = {
+        "target": {"type": "string", "required": True},
+        "count": {"type": "integer", "required": False},
+        "weight": {"type": "number", "required": False},
+        "enabled": {"type": "boolean", "required": False},
+        "offset": {"type": "vector3", "required": False},
+        "names": {"type": "string_array", "required": False},
+        "mode": {"type": "string", "required": False, "enum": ["solid", "wire"]},
+    }
+
+    def execute(self, context: FakeContext, params: dict[str, object]) -> ToolExecutionResult:
+        context.transforms.append(dict(params))
+        return ToolExecutionResult(outputs={"object_name": str(params["target"])}, message="schema")
+
+
 EXECUTION_LOOP_ACTIONS = [
     {
         "action_id": "create_cube",
@@ -155,6 +191,16 @@ def _make_engine(*tool_classes: type[BaseTool]) -> ExecutionEngine:
     for tool_cls in tool_classes:
         registry.register(tool_cls)
     return ExecutionEngine(registry=registry, logger=get_vectra_logger("vectra.tests.execution"))
+
+
+def _make_engine_with_logger(
+    logger: RecordingLogger,
+    *tool_classes: type[BaseTool],
+) -> ExecutionEngine:
+    registry = ToolRegistry()
+    for tool_cls in tool_classes:
+        registry.register(tool_cls)
+    return ExecutionEngine(registry=registry, logger=logger)
 
 
 def test_execution_engine_runs_actions_sequentially_with_refs() -> None:
@@ -186,6 +232,20 @@ def test_execution_engine_invalid_tool_fails_safely() -> None:
     assert report.results[0].error_type == "unknown_tool"
 
 
+def test_hallucinated_mesh_tool_logs_unknown_tool_call() -> None:
+    logger = RecordingLogger()
+    engine = _make_engine_with_logger(logger, FakeCreatePrimitiveTool)
+
+    report = engine.run(
+        FakeContext(),
+        [{"action_id": "bad_mesh", "tool": "mesh.create_cylinder", "params": {}}],
+    )
+
+    assert report.success is False
+    assert report.results[0].error_type == "unknown_tool"
+    assert any(event == "unknown_tool_call" for _level, event, _payload in logger.records)
+
+
 def test_execution_engine_invalid_params_fail_safely() -> None:
     engine = _make_engine(FakeCreatePrimitiveTool, RejectingTransformTool)
     context = FakeContext()
@@ -205,6 +265,38 @@ def test_execution_engine_invalid_params_fail_safely() -> None:
     assert report.failed_action_id == "move"
     assert report.results[0].error == "Invalid transform params"
     assert report.results[0].error_type == "tool_validation_failure"
+
+
+def test_invalid_param_type_returns_structured_validation_failure() -> None:
+    engine = _make_engine(FakeSchemaTool)
+    context = FakeContext()
+
+    report = engine.run(
+        context,
+        [{"action_id": "schema", "tool": "object.schema", "params": {"target": "Cube", "count": "two"}}],
+    )
+
+    assert report.success is False
+    assert context.transforms == []
+    assert report.results[0].error_type == "tool_validation_failure"
+    assert report.results[0].invalid_params == ["count"]
+    assert report.results[0].details["invalid_params"]["count"]["expected_type"] == "integer"
+
+
+def test_invalid_enum_value_returns_structured_validation_failure() -> None:
+    engine = _make_engine(FakeSchemaTool)
+    context = FakeContext()
+
+    report = engine.run(
+        context,
+        [{"action_id": "schema", "tool": "object.schema", "params": {"target": "Cube", "mode": "glow"}}],
+    )
+
+    assert report.success is False
+    assert context.transforms == []
+    assert report.results[0].error_type == "tool_validation_failure"
+    assert report.results[0].invalid_params == ["mode"]
+    assert report.results[0].details["invalid_params"]["mode"]["allowed_values"] == ["solid", "wire"]
 
 
 def test_execution_engine_unresolved_ref_fails_safely() -> None:
@@ -228,6 +320,26 @@ def test_execution_engine_unresolved_ref_fails_safely() -> None:
     assert report.success is False
     assert report.failed_action_id == "move"
     assert "Unknown action reference 'missing'" in report.message
+    assert report.results[0].error_type == "reference_resolution_failure"
+
+
+def test_malformed_ref_returns_structured_reference_failure() -> None:
+    engine = _make_engine(FakeTransformTool)
+    context = FakeContext()
+
+    report = engine.run(
+        context,
+        [
+            {
+                "action_id": "move",
+                "tool": "object.transform",
+                "params": {"object_name": {"$ref": 3}, "location": [1.0, 2.0, 3.0]},
+            }
+        ],
+    )
+
+    assert report.success is False
+    assert context.transforms == []
     assert report.results[0].error_type == "reference_resolution_failure"
 
 
@@ -351,6 +463,32 @@ def test_non_mapping_params_returns_structured_action_validation_failure() -> No
     assert "params must be a mapping" in report.results[0].message
 
 
+def test_duplicate_action_ids_fail_preflight_without_execution() -> None:
+    engine = _make_engine(FakeCreatePrimitiveTool)
+    context = FakeContext()
+
+    report = engine.run(
+        context,
+        [
+            {
+                "action_id": "same",
+                "tool": "mesh.create_primitive",
+                "params": {"primitive_type": "cube", "name": "CubeA"},
+            },
+            {
+                "action_id": "same",
+                "tool": "mesh.create_primitive",
+                "params": {"primitive_type": "cube", "name": "CubeB"},
+            },
+        ],
+    )
+
+    assert report.success is False
+    assert context.created_objects == []
+    assert report.results[0].error_type == "action_validation_failure"
+    assert "Duplicate action_id" in report.results[0].message
+
+
 def test_non_sequence_actions_returns_structured_report_instead_of_raising() -> None:
     engine = _make_engine(FakeCreatePrimitiveTool)
 
@@ -360,6 +498,34 @@ def test_non_sequence_actions_returns_structured_report_instead_of_raising() -> 
     assert report.results[0].tool == "<invalid>"
     assert report.results[0].error_type == "action_validation_failure"
     assert report.results[0].details["received_type"] == "str"
+
+
+def test_static_batch_preflight_blocks_earlier_valid_action_when_later_action_is_invalid() -> None:
+    engine = _make_engine(FakeCreatePrimitiveTool, FakePlaceOnSurfaceTool)
+    context = FakeContext()
+
+    report = engine.run(
+        context,
+        [
+            {
+                "action_id": "create",
+                "tool": "mesh.create_primitive",
+                "params": {"primitive_type": "cube", "name": "Cube"},
+            },
+            {
+                "action_id": "place",
+                "tool": "object.place_on_surface",
+                "params": {"target": "Cube"},
+            },
+        ],
+    )
+
+    assert report.success is False
+    assert context.created_objects == []
+    assert context.transforms == []
+    assert report.results[0].action_id == "place"
+    assert report.results[0].error_type == "tool_validation_failure"
+    assert report.results[0].missing_params == ["reference"]
 
 
 def test_tool_execution_error_is_caught_and_structured() -> None:
@@ -373,6 +539,19 @@ def test_tool_execution_error_is_caught_and_structured() -> None:
     assert report.success is False
     assert report.results[0].error_type == "tool_execution_failure"
     assert report.results[0].message == "Tool exploded safely"
+
+
+def test_tool_execution_error_logs_tool_execution_error() -> None:
+    logger = RecordingLogger()
+    engine = _make_engine_with_logger(logger, ExecutionErrorTool)
+
+    report = engine.run(
+        FakeContext(),
+        [{"action_id": "explode", "tool": "object.execution_error", "params": {"target": "Cube"}}],
+    )
+
+    assert report.success is False
+    assert any(event == "tool_execution_error" for _level, event, _payload in logger.records)
 
 
 def test_unexpected_exception_is_caught_and_structured() -> None:
@@ -408,6 +587,21 @@ def test_place_on_surface_auto_fills_exact_floor_reference() -> None:
     assert context.transforms == [{"target": "Lamp", "reference": "floor"}]
     assert report.results[0].repairs == ["Auto-filled missing reference with exact floor object 'floor'"]
     assert report.repairs == ["Auto-filled missing reference with exact floor object 'floor'"]
+
+
+def test_place_on_surface_auto_repair_is_logged() -> None:
+    logger = RecordingLogger()
+    engine = _make_engine_with_logger(logger, FakePlaceOnSurfaceTool)
+    context = FakeContext()
+    context.scene = SimpleNamespace(objects=[SimpleNamespace(name="floor"), SimpleNamespace(name="Lamp")])
+
+    report = engine.run(
+        context,
+        [{"action_id": "place", "tool": "object.place_on_surface", "params": {"target": "Lamp"}}],
+    )
+
+    assert report.success is True
+    assert any(event == "tool_auto_repair" for _level, event, _payload in logger.records)
 
 
 def test_place_on_surface_does_not_auto_fill_ambiguous_floor_reference() -> None:
