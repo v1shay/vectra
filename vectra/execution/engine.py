@@ -94,6 +94,18 @@ class ExecutionEngine:
             log_execution_report(self.logger, report)
             return report
 
+        preflight_result = self._preflight_actions(context, actions)
+        if preflight_result is not None:
+            report = ExecutionReport(
+                success=False,
+                results=[preflight_result],
+                failed_action_id=preflight_result.action_id,
+                message=f"Action failed: {preflight_result.tool} - {preflight_result.message or preflight_result.error or 'Unknown error'}",
+                repairs=list(preflight_result.repairs),
+            )
+            log_execution_report(self.logger, report)
+            return report
+
         results: list[ActionExecutionResult] = []
         outputs_by_action: dict[str, dict[str, Any]] = {}
         seen_action_ids: set[str] = set()
@@ -304,22 +316,83 @@ class ExecutionEngine:
             details=structured_details,
         )
         log_action_failure(self.logger, action_id, tool, message)
-        log_event = "tool_validation_failure" if error_type == "tool_validation_failure" else "tool_execution_error"
-        log_structured(
-            self.logger,
-            log_event,
-            {
-                "action_id": action_id,
-                "tool": tool,
-                "error_type": error_type,
-                "message": message,
-                "missing_params": result.missing_params,
-                "invalid_params": result.invalid_params,
-                "details": structured_details,
-            },
-            level="warning" if error_type in {"action_validation_failure", "reference_resolution_failure", "tool_validation_failure", "unknown_tool"} else "error",
-        )
+        log_event = {
+            "tool_validation_failure": "tool_validation_failure",
+            "unknown_tool": "unknown_tool_call",
+            "tool_execution_failure": "tool_execution_error",
+            "unexpected_execution_error": "tool_execution_error",
+        }.get(error_type)
+        if log_event is not None:
+            log_structured(
+                self.logger,
+                log_event,
+                {
+                    "action_id": action_id,
+                    "tool": tool,
+                    "error_type": error_type,
+                    "message": message,
+                    "missing_params": result.missing_params,
+                    "invalid_params": result.invalid_params,
+                    "details": structured_details,
+                },
+                level="warning" if error_type in {"tool_validation_failure", "unknown_tool"} else "error",
+            )
         return result
+
+    def _preflight_actions(self, context: Any, actions: Sequence[Any]) -> ActionExecutionResult | None:
+        seen_action_ids: set[str] = set()
+        for index, raw_action in enumerate(actions):
+            action_id = self._extract_action_id(raw_action)
+            tool_name = self._extract_tool_name(raw_action)
+            try:
+                normalized_action = self._normalize_action(raw_action, index, seen_action_ids)
+                tool_name = normalized_action.tool
+                action_id = normalized_action.action_id
+                tool = self.registry.get(normalized_action.tool)
+                repaired_params, _auto_repairs = self._apply_auto_repairs(
+                    context,
+                    normalized_action.tool,
+                    normalized_action.params,
+                    normalized_action.action_id,
+                    log_repair=False,
+                )
+                normalized_params = normalize_action_params(tool, repaired_params)
+                validation_params = self._params_with_ref_placeholders(tool, normalized_params.params)
+                tool.validate_params(validation_params)
+            except ActionValidationError as exc:
+                return self._error_result(
+                    action_id=action_id,
+                    tool=tool_name,
+                    error_type="action_validation_failure",
+                    message=str(exc),
+                )
+            except ToolNotFoundError as exc:
+                return self._error_result(
+                    action_id=action_id,
+                    tool=tool_name,
+                    error_type="unknown_tool",
+                    message=str(exc),
+                    details={"available_tools": self.registry.list_tools()},
+                )
+            except ToolValidationError as exc:
+                return self._error_result(
+                    action_id=action_id,
+                    tool=tool_name,
+                    error_type="tool_validation_failure",
+                    message=str(exc),
+                    missing_params=getattr(exc, "missing_params", []),
+                    invalid_params=getattr(exc, "invalid_params", []),
+                    details=getattr(exc, "details", {}),
+                )
+            except Exception as exc:  # pragma: no cover - preflight hard guard
+                return self._error_result(
+                    action_id=action_id,
+                    tool=tool_name,
+                    error_type="unexpected_execution_error",
+                    message=f"Unexpected execution preflight error: {exc}",
+                    details={"exception_type": type(exc).__name__},
+                )
+        return None
 
     def _apply_auto_repairs(
         self,
@@ -327,6 +400,8 @@ class ExecutionEngine:
         tool_name: str,
         params: Mapping[str, Any],
         action_id: str | None,
+        *,
+        log_repair: bool = True,
     ) -> tuple[dict[str, Any], list[str]]:
         repaired = dict(params)
         repairs: list[str] = []
@@ -342,18 +417,55 @@ class ExecutionEngine:
         repaired["reference"] = floor_name
         reason = f"Auto-filled missing reference with exact floor object '{floor_name}'"
         repairs.append(reason)
-        log_structured(
-            self.logger,
-            "tool_auto_repair",
-            {
-                "action_id": action_id,
-                "tool": tool_name,
-                "field": "reference",
-                "value": floor_name,
-                "reason": reason,
-            },
-        )
+        if log_repair:
+            log_structured(
+                self.logger,
+                "tool_auto_repair",
+                {
+                    "action_id": action_id,
+                    "tool": tool_name,
+                    "field": "reference",
+                    "value": floor_name,
+                    "reason": reason,
+                },
+            )
         return repaired, repairs
+
+    def _params_with_ref_placeholders(self, tool: Any, params: dict[str, Any]) -> dict[str, Any]:
+        validation_params = dict(params)
+        for key, value in params.items():
+            if self._contains_action_ref(value):
+                spec = tool.input_schema.get(key, {})
+                validation_params[key] = self._placeholder_for_spec(spec if isinstance(spec, dict) else {})
+        return validation_params
+
+    @staticmethod
+    def _contains_action_ref(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            if set(value.keys()) == {"$ref"}:
+                return True
+            return any(ExecutionEngine._contains_action_ref(nested_value) for nested_value in value.values())
+        if isinstance(value, list):
+            return any(ExecutionEngine._contains_action_ref(item) for item in value)
+        return False
+
+    @staticmethod
+    def _placeholder_for_spec(spec: dict[str, Any]) -> Any:
+        enum_values = spec.get("enum")
+        if isinstance(enum_values, list) and enum_values:
+            return enum_values[0]
+        expected_type = str(spec.get("type", "string")).strip()
+        if expected_type == "number":
+            return 0.0
+        if expected_type == "integer":
+            return 0
+        if expected_type == "boolean":
+            return False
+        if expected_type == "vector3":
+            return [0.0, 0.0, 0.0]
+        if expected_type == "string_array":
+            return ["__pending_action_ref__"]
+        return "__pending_action_ref__"
 
     @staticmethod
     def _exact_floor_name(context: Any) -> str | None:
