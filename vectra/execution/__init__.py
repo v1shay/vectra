@@ -1,7 +1,7 @@
 """Execution engine package for Vectra."""
 
 from .code import CodeExecutionReport, ConsoleCodeExecutor
-from .engine import ActionExecutionResult, ExecutionEngine, ExecutionReport
+from .engine import ActionExecutionResult, ExecutionEngine, ExecutionReport, execute_action
 
 __all__ = [
     "ActionExecutionResult",
@@ -9,4 +9,5 @@ __all__ = [
     "ConsoleCodeExecutor",
     "ExecutionEngine",
     "ExecutionReport",
+    "execute_action",
 ]
