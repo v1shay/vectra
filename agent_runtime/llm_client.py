@@ -35,6 +35,8 @@ class LLMRuntimeSettings:
     ollama_host: str
     ollama_primary_model: str
     ollama_secondary_model: str
+    audit_mode: bool = False
+    disable_provider_fallback: bool = False
 
 
 def read_runtime_settings() -> LLMRuntimeSettings:
@@ -49,6 +51,8 @@ def read_runtime_settings() -> LLMRuntimeSettings:
         ollama_host=runtime.ollama_host,
         ollama_primary_model=runtime.ollama_primary_model,
         ollama_secondary_model=runtime.ollama_secondary_model,
+        audit_mode=runtime.audit_mode,
+        disable_provider_fallback=runtime.disable_provider_fallback,
     )
 
 
