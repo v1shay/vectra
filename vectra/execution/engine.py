@@ -8,6 +8,7 @@ from typing import Any
 from .normalization import normalize_action_params
 from ..tools.base import ToolExecutionError, ToolValidationError
 from ..tools.registry import ToolNotFoundError, ToolRegistry, ToolRegistryError, get_default_registry
+from ..tools.spatial_constraints import SpatialConstraintSolver
 from ..utils.logging import (
     get_vectra_logger,
     log_action_failure,
@@ -184,6 +185,13 @@ class ExecutionEngine:
             )
             tool_result = tool.execute(context, validated_params)
             action_outputs = dict(tool_result.outputs)
+            spatial_repairs = self._enforce_spatial_constraints(
+                context,
+                normalized_action.tool,
+                action_outputs,
+                normalized_action.action_id,
+            )
+            repaired_messages.extend(spatial_repairs)
             log_action_success(
                 self.logger,
                 normalized_action.action_id,
@@ -393,6 +401,97 @@ class ExecutionEngine:
                     details={"exception_type": type(exc).__name__},
                 )
         return None
+
+    def _enforce_spatial_constraints(
+        self,
+        context: Any,
+        tool_name: str,
+        action_outputs: dict[str, Any],
+        action_id: str | None,
+    ) -> list[str]:
+        if not self._spatial_gate_applies(tool_name):
+            return []
+        objects = self._scene_objects(context)
+        if not objects:
+            return []
+        affected_names = [
+            name
+            for name in action_outputs.get("object_names", [])
+            if isinstance(name, str) and name.strip()
+        ]
+        object_name = action_outputs.get("object_name")
+        if isinstance(object_name, str) and object_name.strip() and object_name not in affected_names:
+            affected_names.append(object_name)
+        if not affected_names:
+            return []
+
+        solver = SpatialConstraintSolver(objects)
+        report = solver.validate(affected_names=affected_names)
+        if report.ok:
+            return []
+
+        repairs: list[str] = []
+        for repair_action in report.repair_actions:
+            repair_tool_name = repair_action.get("tool")
+            repair_params = repair_action.get("params", {})
+            if not isinstance(repair_tool_name, str) or not isinstance(repair_params, dict):
+                continue
+            try:
+                repair_tool = self.registry.get(repair_tool_name)
+                normalized_params = normalize_action_params(repair_tool, repair_params)
+                validated_params = repair_tool.validate_params(normalized_params.params)
+                repair_result = repair_tool.execute(context, validated_params)
+            except Exception as exc:
+                repairs.append(f"Spatial repair {repair_tool_name} failed: {exc}")
+                continue
+            repaired_names = repair_result.outputs.get("object_names", [])
+            repairs.append(
+                f"Applied spatial repair {repair_tool_name} to {repaired_names or repair_params.get('target')}"
+            )
+
+        repaired_report = SpatialConstraintSolver(self._scene_objects(context)).validate(affected_names=affected_names)
+        if repaired_report.ok:
+            for message in repairs:
+                log_structured(
+                    self.logger,
+                    "tool_auto_repair",
+                    {
+                        "action_id": action_id,
+                        "tool": tool_name,
+                        "repair": message,
+                        "repair_type": "spatial_constraint",
+                    },
+                )
+            return repairs
+
+        issue_text = "; ".join(
+            f"{issue.get('object')}: {issue.get('issues')}"
+            for issue in repaired_report.top_issues
+        )
+        raise ToolExecutionError(f"Spatial constraints failed after repair: {issue_text}")
+
+    @staticmethod
+    def _spatial_gate_applies(tool_name: str) -> bool:
+        return (
+            tool_name == "mesh.create_primitive"
+            or tool_name == "object.transform"
+            or tool_name.startswith("object.place_")
+            or tool_name in {"object.snap_to_support", "object.resolve_overlap", "object.fit_inside"}
+        )
+
+    @staticmethod
+    def _scene_objects(context: Any) -> list[Any]:
+        scene = getattr(context, "scene", None)
+        objects = getattr(scene, "objects", None)
+        if objects is None:
+            return []
+        try:
+            return [
+                obj for obj in list(objects)
+                if hasattr(obj, "location") and hasattr(obj, "dimensions")
+            ]
+        except TypeError:
+            return []
 
     def _apply_auto_repairs(
         self,
