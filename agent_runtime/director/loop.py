@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import json
 from typing import Any
 
+from vectra.execution.normalization import normalize_action_params
 from vectra.tools.base import BaseTool, ToolValidationError
 from vectra.tools.registry import ToolNotFoundError, ToolRegistry, get_default_registry
 from vectra.utils.logging import get_vectra_logger, log_structured
@@ -121,7 +122,12 @@ def _tool_family(tool_name: str) -> str:
         return "create"
     if tool_name.startswith("object.transform"):
         return "transform"
-    if tool_name.startswith("object.place_") or tool_name == "object.align_to":
+    if tool_name.startswith("object.place_") or tool_name in {
+        "object.align_to",
+        "object.fit_inside",
+        "object.resolve_overlap",
+        "object.snap_to_support",
+    }:
         return "layout"
     if tool_name.startswith("object.duplicate"):
         return "duplicate"
@@ -201,22 +207,29 @@ def _compact_spatial_anchors(scene_state: dict[str, Any]) -> str:
 def _compact_scene_state(scene_state: dict[str, Any]) -> str:
     objects = scene_state.get("objects", [])
     compact_objects: list[str] = []
+    scene_diagnostics = scene_state.get("spatial_diagnostics", {})
+    top_issues = []
+    if isinstance(scene_diagnostics, dict):
+        top_issues = scene_diagnostics.get("top_issues", [])
     if isinstance(objects, list):
         for obj in objects[:24]:
             if not isinstance(obj, dict):
                 continue
             spatial = obj.get("spatial", {}) if isinstance(obj.get("spatial"), dict) else {}
+            diagnostics = obj.get("spatial_diagnostics", {}) if isinstance(obj.get("spatial_diagnostics"), dict) else {}
+            diagnostic_issues = diagnostics.get("issues", [])
             relations = obj.get("relations", []) if isinstance(obj.get("relations"), list) else []
             relation_text = ", ".join(
                 f"{item.get('relation')}:{item.get('target')}"
                 for item in relations[:6]
                 if isinstance(item, dict)
             )
+            diagnostics_text = ",".join(str(issue) for issue in diagnostic_issues[:4]) if isinstance(diagnostic_issues, list) else "none"
             compact_objects.append(
                 "name={name} type={type} active={active} selected={selected} "
                 "location={location} dimensions={dimensions} bounds={bounds} "
                 "spatial_center={spatial_center} grounded={grounded} floor_contact={floor_contact} "
-                "wall_like={wall_like} floor_like={floor_like} relations={relations} "
+                "wall_like={wall_like} floor_like={floor_like} diagnostics={diagnostics} relations={relations} "
                 "parent={parent} materials={materials} animation={animation}".format(
                     name=obj.get("name"),
                     type=obj.get("type"),
@@ -230,6 +243,7 @@ def _compact_scene_state(scene_state: dict[str, Any]) -> str:
                     floor_contact=spatial.get("floor_contact"),
                     wall_like=spatial.get("is_wall_like"),
                     floor_like=spatial.get("is_floor_like"),
+                    diagnostics=diagnostics_text or "none",
                     relations=relation_text or "none",
                     parent=obj.get("parent"),
                     materials=obj.get("material_names", []),
@@ -245,6 +259,7 @@ def _compact_scene_state(scene_state: dict[str, Any]) -> str:
         f"Current frame: {scene_state.get('current_frame')}\n"
         f"Scene centroid: {scene_state.get('scene_centroid')}\n"
         f"Scene bounds: {scene_state.get('scene_bounds')}\n"
+        f"Spatial diagnostics: {top_issues if top_issues else 'none'}\n"
         f"Spatial anchors: {_compact_spatial_anchors(scene_state)}\n"
         f"Lights: {lights}\n"
         f"Groups: {groups}\n"
@@ -257,6 +272,7 @@ def _compact_scene_state(scene_state: dict[str, Any]) -> str:
             f"Current frame: {scene_state.get('current_frame')}\n"
             f"Scene centroid: {scene_state.get('scene_centroid')}\n"
             f"Scene bounds: {scene_state.get('scene_bounds')}\n"
+            f"Spatial diagnostics: {top_issues if top_issues else 'none'}\n"
             f"Spatial anchors: {_compact_spatial_anchors(scene_state)}\n"
             f"Lights: {lights}\n"
             f"Groups: {groups}\n"
@@ -344,10 +360,31 @@ def _build_director_prompt(
         "Spatial tool guidance:\n"
         "- Use object.place_on_surface for contact such as one object resting on another.\n"
         "- Use object.place_against, object.place_relative, object.align_to, or object.place_at_anchor for exact geometry-derived placement.\n"
+        "- If spatial diagnostics report floating, overlap, or outside-support issues, prefer object.snap_to_support, object.resolve_overlap, or object.fit_inside before adding more objects.\n"
         "- Use exact object names for objects created earlier in the same batch; Vectra will convert them into action references.\n"
         "- Do not use unsupported camera.keyframe or light.keyframe tools; use object.keyframe with a camera or light target.\n\n"
         "Tool definitions are supplied separately when the provider supports structured tools."
     )
+
+
+def _call_director(
+    *,
+    prompt_text: str,
+    tools: list[dict[str, Any]],
+    allow_complete: bool,
+    screenshot: dict[str, Any] | None,
+) -> ProviderResult:
+    try:
+        return call_director(
+            prompt_text=prompt_text,
+            tools=tools,
+            allow_complete=allow_complete,
+            screenshot=screenshot,
+        )
+    except TypeError as exc:
+        if "screenshot" not in str(exc):
+            raise
+        return call_director(prompt_text=prompt_text, tools=tools, allow_complete=allow_complete)
 
 
 def _serialized_provider_attempts(provider_attempts: list[Any]) -> list[dict[str, Any]]:
@@ -526,7 +563,8 @@ class DirectorLoop:
                 continue
 
             try:
-                normalized_arguments = tool.validate_params(tool_call.arguments)
+                normalized_params = normalize_action_params(tool, tool_call.arguments)
+                normalized_arguments = tool.validate_params(normalized_params.params)
             except ToolValidationError as exc:
                 issues.append(ToolCallValidationIssue(tool_name=tool_call.name, reason=str(exc)))
                 continue
@@ -580,7 +618,8 @@ class DirectorLoop:
                 raw_params = params if isinstance(params, dict) else {}
                 has_action_ref = _contains_action_ref(raw_params)
                 validation_params = _refs_as_validation_placeholders(raw_params) if has_action_ref else raw_params
-                normalized_params = tool.validate_params(validation_params)
+                normalized_action_params = normalize_action_params(tool, validation_params)
+                normalized_params = tool.validate_params(normalized_action_params.params)
             except ToolValidationError as exc:
                 issues.append(ToolCallValidationIssue(tool_name=tool_name, reason=str(exc)))
                 continue
@@ -880,10 +919,11 @@ class DirectorLoop:
         prompt_text = _build_director_prompt(context, controller_decision, budget_state)
 
         try:
-            provider_result = call_director(
+            provider_result = _call_director(
                 prompt_text=prompt_text,
                 tools=tools,
                 allow_complete=context.iteration > 1,
+                screenshot=context.screenshot,
             )
         except ProviderError as exc:
             return _provider_error_turn(exc, budget_state)
@@ -922,10 +962,11 @@ class DirectorLoop:
                     level="warning",
                 )
                 try:
-                    provider_result = call_director(
+                    provider_result = _call_director(
                         prompt_text=self._tool_validation_retry_prompt(prompt_text, validation_issues),
                         tools=tools,
                         allow_complete=context.iteration > 1,
+                        screenshot=context.screenshot,
                     )
                 except ProviderError as exc:
                     return _provider_error_turn(exc, budget_state)
@@ -958,10 +999,11 @@ class DirectorLoop:
                     level="warning",
                 )
                 try:
-                    provider_result = call_director(
+                    provider_result = _call_director(
                         prompt_text=self._tool_validation_retry_prompt(prompt_text, validation_issues),
                         tools=tools,
                         allow_complete=context.iteration > 1,
+                        screenshot=context.screenshot,
                     )
                 except ProviderError as exc:
                     return _provider_error_turn(exc, budget_state)
@@ -1107,8 +1149,17 @@ class DirectorLoop:
             )
 
         runtime_state = provider_result.runtime_state
+        failed_provider_attempts = [
+            attempt
+            for attempt in provider_attempts
+            if getattr(attempt, "runtime_state", "") in {"provider_transport_failure", "provider_deadline_exceeded"}
+        ]
         runtime_state_detail = (
-            f"Valid action batch ready via fallback provider {provider_result.provider}."
+            (
+                f"Cloud providers failed; valid action batch ready via fallback provider {provider_result.provider}."
+                if failed_provider_attempts
+                else f"Valid action batch ready via fallback provider {provider_result.provider}."
+            )
             if runtime_state == "fallback_provider_invoked"
             else f"Valid action batch ready from {provider_result.provider}."
         )

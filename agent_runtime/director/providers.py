@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
+from pathlib import Path
 import time
 from dataclasses import replace
 from typing import Any
@@ -56,8 +59,43 @@ def build_controller_input(prompt: str, scene_state: dict[str, Any]) -> str:
     )
 
 
-def build_director_input(prompt_text: str) -> str:
-    return prompt_text
+def _screenshot_data_url(screenshot: dict[str, Any] | None) -> str | None:
+    if not isinstance(screenshot, dict) or not bool(screenshot.get("available")):
+        return None
+    path = screenshot.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    screenshot_path = Path(path)
+    if not screenshot_path.is_file():
+        return None
+    mime_type = mimetypes.guess_type(str(screenshot_path))[0] or "image/png"
+    try:
+        encoded = base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
+    except OSError:
+        return None
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def build_director_input(
+    prompt_text: str,
+    *,
+    screenshot: dict[str, Any] | None = None,
+    supports_image_input: bool = False,
+) -> str | list[dict[str, Any]]:
+    if not supports_image_input:
+        return prompt_text
+    image_url = _screenshot_data_url(screenshot)
+    if image_url is None:
+        return prompt_text
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt_text},
+                {"type": "input_image", "image_url": image_url},
+            ],
+        }
+    ]
 
 
 def _actionability_hint(*, allow_complete: bool) -> str:
@@ -261,6 +299,7 @@ def call_director(
     prompt_text: str,
     tools: list[dict[str, Any]],
     allow_complete: bool = False,
+    screenshot: dict[str, Any] | None = None,
 ) -> ProviderResult:
     runtime = load_runtime_config()
     attempts: list[ProviderAttempt] = []
@@ -332,9 +371,14 @@ def call_director(
 
             request_timeout_seconds = min(runtime.director_timeout_seconds, remaining_deadline_seconds)
             provider_attempts_used += 1
+            adapter_capabilities = getattr(adapter, "capabilities", None)
             request = ProviderRequest(
                 instructions=director_system_prompt(),
-                user_input=build_director_input(prompt_text),
+                user_input=build_director_input(
+                    prompt_text,
+                    screenshot=screenshot,
+                    supports_image_input=bool(getattr(adapter_capabilities, "supports_image_input", False)),
+                ),
                 tools=tools,
                 corrective_hint=_actionability_hint(allow_complete=allow_complete) if corrective_retry else None,
             )
