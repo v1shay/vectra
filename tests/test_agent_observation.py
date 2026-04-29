@@ -51,6 +51,8 @@ def test_build_scene_state_includes_relationship_and_dimension_fields(monkeypatc
     assert scene_state["objects"][0]["collection_names"] == ["Collection"]
     assert scene_state["objects"][0]["spatial"]["center"] == [1.0, 2.0, 3.0]
     assert "top" in scene_state["objects"][0]["spatial"]["face_centers"]
+    assert scene_state["objects"][0]["spatial_diagnostics"]["issues"] == ["floating", "unsupported"]
+    assert scene_state["spatial_diagnostics"]["issue_count"] >= 1
     assert scene_state["spatial_anchors"]
     assert scene_state["spatial_relations"] == []
 
@@ -137,6 +139,8 @@ def test_build_scene_state_includes_stable_spatial_relations_and_anchors(monkeyp
     assert {"source": "Cube", "target": "Floor", "relation": "on"} in first_state["spatial_relations"]
     assert first_state["objects"][0]["spatial"]["grounded"] is True
     assert first_state["objects"][0]["spatial"]["floor_contact"] == {"object": "Floor", "gap": 0.0}
+    assert first_state["objects"][0]["spatial_diagnostics"]["issues"] == []
+    assert first_state["spatial_diagnostics"]["issue_count"] == 0
     assert first_state["spatial_relations"] == second_state["spatial_relations"]
     assert first_state["spatial_anchors"] == second_state["spatial_anchors"]
 
