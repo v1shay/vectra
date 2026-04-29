@@ -270,3 +270,54 @@ def test_director_loop_fails_visibly_for_future_spatial_reference(monkeypatch) -
     assert turn.status == "error"
     assert turn.metadata["runtime_state"] == "tool_validation_failure"
     assert "Missing required param" in turn.metadata["failure_reason"]
+
+
+def test_director_loop_repairs_invalid_coordinate_refs_before_execution(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_controller",
+        lambda prompt, scene_state: __import__("agent_runtime.director.models", fromlist=["ControllerDecision"]).ControllerDecision(),
+    )
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_director",
+        lambda prompt_text, tools, allow_complete=False: ProviderResult(
+            provider="ollama-primary",
+            model="qwen2.5-coder:32b",
+            parsed=ParsedProviderResponse(
+                assistant_text="I will adjust presentation from prior outputs.",
+                tool_calls=[
+                    ToolCall(name="object.place_relative", arguments={"target": "Shelf", "reference": "Table", "relation": "front", "distance": 1.0}),
+                    ToolCall(name="light.adjust", arguments={"target": "Point", "location": {"$ref": "step_1.location"}, "energy": 1500}),
+                    ToolCall(name="camera.adjust", arguments={"look_at": "Table", "location": {"$ref": "step_2.location"}}),
+                    ToolCall(name="object.keyframe", arguments={"target": "Point", "property": "location", "frame": 1, "value": {"$ref": "step_2.location"}}),
+                ],
+                response_type="tool_calls",
+            ),
+        ),
+    )
+
+    turn = DirectorLoop().step(
+        _context(
+            {
+                "active_object": None,
+                "selected_objects": [],
+                "objects": [
+                    {"name": "Floor", "type": "MESH", "location": [0.0, 0.0, 0.0], "dimensions": [8.0, 8.0, 0.0]},
+                    {"name": "Table", "type": "MESH", "location": [0.0, 0.0, 0.5], "dimensions": [2.0, 2.0, 1.0]},
+                    {"name": "Shelf", "type": "MESH", "location": [0.0, 2.0, 0.5], "dimensions": [2.0, 0.4, 1.0]},
+                    {"name": "Point", "type": "LIGHT", "location": [4.0, -4.0, 4.0], "dimensions": [0.0, 0.0, 0.0]},
+                    {"name": "Camera", "type": "CAMERA", "location": [6.0, -6.0, 5.0], "dimensions": [0.0, 0.0, 0.0]},
+                ],
+                "active_camera": "Camera",
+                "lights": [{"name": "Point"}],
+                "groups": [],
+                "scene_centroid": [2.0, -1.6, 2.0],
+                "scene_bounds": {"min": [-4.0, -4.0, 0.0], "max": [6.0, 4.0, 5.0]},
+            }
+        )
+    )
+
+    assert turn.status == "ok"
+    assert list(turn.metadata["actions"][1]["params"]["location"]) == [4.0, -4.0, 4.0]
+    assert list(turn.metadata["actions"][2]["params"]["location"]) == [8.0, -8.0, 6.5]
+    assert "value" not in turn.metadata["actions"][3]["params"]
+    assert any("Ignored invalid coordinate reference" in assumption.reason for assumption in turn.assumptions)

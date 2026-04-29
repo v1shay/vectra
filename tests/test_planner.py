@@ -35,6 +35,7 @@ def test_runtime_settings_read_new_director_env(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("VECTRA_DIRECTOR_API_KEY", "test-openai")
     monkeypatch.setenv("VECTRA_OLLAMA_MODEL_PRIMARY", "qwen2.5-coder:32b")
     monkeypatch.setenv("VECTRA_OLLAMA_MODEL_SECONDARY", "deepseek-coder-v2:16b")
+    monkeypatch.setenv("VECTRA_DIRECTOR_AUDIT_MODE", "true")
 
     settings = read_runtime_settings()
     runtime_config = load_runtime_config()
@@ -49,6 +50,8 @@ def test_runtime_settings_read_new_director_env(monkeypatch: pytest.MonkeyPatch)
     assert runtime_config.director.transport == "responses"
     assert runtime_config.director_step_deadline_seconds == 55.0
     assert runtime_config.director_provider_attempt_budget == 3
+    assert runtime_config.audit_mode is True
+    assert runtime_config.disable_provider_fallback is True
 
 
 def test_controller_uses_xai_profile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,6 +237,43 @@ def test_director_falls_back_to_ollama_after_cloud_failures(monkeypatch: pytest.
 
     assert result.provider == "ollama-primary"
     assert result.model == "qwen2.5-coder:32b"
+
+
+def test_audit_mode_disables_provider_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VECTRA_DIRECTOR_AUDIT_MODE", "true")
+    monkeypatch.setenv("VECTRA_DIRECTOR_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("VECTRA_DIRECTOR_API_KEY", "test-openai")
+    monkeypatch.setenv("VECTRA_CONTROLLER_BASE_URL", "https://api.x.ai/v1")
+    monkeypatch.setenv("VECTRA_CONTROLLER_API_KEY", "test-xai")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    seen_providers: list[str] = []
+
+    monkeypatch.setattr(
+        "agent_runtime.director.providers.get_provider_adapter",
+        lambda config: FakeAdapter(
+            lambda config, request, timeout, max_retries: (
+                seen_providers.append(config.provider),
+                AdapterCallResult(
+                    parsed=None,
+                    attempt=ProviderAttempt(
+                        provider=config.provider,
+                        model=config.model,
+                        transport=config.transport,
+                        runtime_state="provider_transport_failure",
+                        response_type="transport_failure",
+                        failure_reason="primary failed",
+                        request_metadata={"tool_count": len(request.tools)},
+                    ),
+                    capabilities=ProviderAdapterCapabilities(),
+                ),
+            )[-1]
+        ),
+    )
+
+    with pytest.raises(ProviderError):
+        call_director(prompt_text="prompt", tools=[], allow_complete=False)
+
+    assert seen_providers == ["openai-director"]
 
 
 def test_plan_uses_director_loop_compatibility_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
