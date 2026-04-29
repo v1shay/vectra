@@ -332,6 +332,290 @@ def floor_contact_record(
     return sorted(contacts, key=lambda item: (item["gap"], item["object"]))[0]
 
 
+def bounds_intersection_extents(first_bounds: Mapping[str, Any], second_bounds: Mapping[str, Any]) -> Vector3:
+    first_minimum = coerce_vector3(first_bounds.get("min"), field_name="first_bounds.min")
+    first_maximum = coerce_vector3(first_bounds.get("max"), field_name="first_bounds.max")
+    second_minimum = coerce_vector3(second_bounds.get("min"), field_name="second_bounds.min")
+    second_maximum = coerce_vector3(second_bounds.get("max"), field_name="second_bounds.max")
+    return tuple(
+        max(0.0, min(first_maximum[index], second_maximum[index]) - max(first_minimum[index], second_minimum[index]))
+        for index in range(3)
+    )
+
+
+def bounds_intersection_volume(first_bounds: Mapping[str, Any], second_bounds: Mapping[str, Any]) -> float:
+    extents = bounds_intersection_extents(first_bounds, second_bounds)
+    return float(extents[0] * extents[1] * extents[2])
+
+
+def bounds_contains_xy(
+    container_bounds: Mapping[str, Any],
+    target_bounds: Mapping[str, Any],
+    *,
+    tolerance: float = CONTACT_TOLERANCE,
+) -> bool:
+    container_minimum = coerce_vector3(container_bounds.get("min"), field_name="container_bounds.min")
+    container_maximum = coerce_vector3(container_bounds.get("max"), field_name="container_bounds.max")
+    target_minimum = coerce_vector3(target_bounds.get("min"), field_name="target_bounds.min")
+    target_maximum = coerce_vector3(target_bounds.get("max"), field_name="target_bounds.max")
+    return (
+        target_minimum[0] >= container_minimum[0] - tolerance
+        and target_maximum[0] <= container_maximum[0] + tolerance
+        and target_minimum[1] >= container_minimum[1] - tolerance
+        and target_maximum[1] <= container_maximum[1] + tolerance
+    )
+
+
+def bounds_overlap_area_xy(first_bounds: Mapping[str, Any], second_bounds: Mapping[str, Any]) -> float:
+    extents = bounds_intersection_extents(first_bounds, second_bounds)
+    return float(extents[0] * extents[1])
+
+
+def _bounds_volume(bounds: Mapping[str, Any]) -> float:
+    extents = bounds_extents(bounds)
+    return max(float(extents[0]), 0.0) * max(float(extents[1]), 0.0) * max(float(extents[2]), 0.0)
+
+
+def _support_candidates_for_object(
+    target: Mapping[str, Any],
+    objects: Iterable[Mapping[str, Any]],
+    *,
+    max_gap: float = NEAR_TOLERANCE,
+) -> list[dict[str, Any]]:
+    target_name = name_of(target)
+    target_bounds = world_bounds(target)
+    target_bottom = target_bounds["min"][2]
+    candidates: list[dict[str, Any]] = []
+    for candidate in objects:
+        candidate_name = name_of(candidate)
+        if not candidate_name or candidate_name == target_name or object_type(candidate) != "MESH":
+            continue
+        candidate_bounds = world_bounds(candidate)
+        candidate_top = candidate_bounds["max"][2]
+        gap = float(target_bottom - candidate_top)
+        if gap < -CONTACT_TOLERANCE or gap > max_gap:
+            continue
+        overlap_area = bounds_overlap_area_xy(target_bounds, candidate_bounds)
+        if overlap_area <= 0.0:
+            continue
+        candidates.append(
+            {
+                "object": candidate_name,
+                "gap": gap,
+                "overlap_area": overlap_area,
+                "contains_xy": bounds_contains_xy(candidate_bounds, target_bounds),
+                "is_floor_like": is_floor_like(candidate),
+            }
+        )
+    return sorted(candidates, key=lambda item: (abs(float(item["gap"])), -float(item["overlap_area"]), item["object"]))
+
+
+def _deepest_intersection(
+    target: Mapping[str, Any],
+    objects: Iterable[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    target_name = name_of(target)
+    target_bounds = world_bounds(target)
+    target_volume = max(_bounds_volume(target_bounds), 0.0001)
+    intersections: list[dict[str, Any]] = []
+    for candidate in objects:
+        candidate_name = name_of(candidate)
+        if not candidate_name or candidate_name == target_name or object_type(candidate) != "MESH":
+            continue
+        candidate_bounds = world_bounds(candidate)
+        extents = bounds_intersection_extents(target_bounds, candidate_bounds)
+        if not all(component > CONTACT_TOLERANCE for component in extents):
+            continue
+        volume = float(extents[0] * extents[1] * extents[2])
+        candidate_volume = max(_bounds_volume(candidate_bounds), 0.0001)
+        smaller_volume = min(target_volume, candidate_volume)
+        if volume / smaller_volume < 0.02:
+            continue
+        intersections.append(
+            {
+                "object": candidate_name,
+                "overlap_extents": vector_to_list(extents),
+                "overlap_volume": volume,
+                "overlap_ratio": volume / smaller_volume,
+            }
+        )
+    if not intersections:
+        return None
+    return sorted(intersections, key=lambda item: (-float(item["overlap_volume"]), item["object"]))[0]
+
+
+def _nearest_clearance(
+    target: Mapping[str, Any],
+    objects: Iterable[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    target_name = name_of(target)
+    target_bounds = world_bounds(target)
+    clearances: list[dict[str, Any]] = []
+    for candidate in objects:
+        candidate_name = name_of(candidate)
+        if not candidate_name or candidate_name == target_name or object_type(candidate) != "MESH":
+            continue
+        candidate_bounds = world_bounds(candidate)
+        z_gap = bounds_axis_gap(target_bounds, candidate_bounds, axis=2)
+        if z_gap > CONTACT_TOLERANCE:
+            continue
+        x_gap = bounds_axis_gap(target_bounds, candidate_bounds, axis=0)
+        y_gap = bounds_axis_gap(target_bounds, candidate_bounds, axis=1)
+        side_gaps = [gap for gap in (x_gap, y_gap) if gap >= 0.0]
+        if not side_gaps:
+            continue
+        gap = min(side_gaps)
+        if gap <= CONTACT_TOLERANCE:
+            continue
+        clearances.append({"object": candidate_name, "gap": gap})
+    if not clearances:
+        return None
+    return sorted(clearances, key=lambda item: (float(item["gap"]), item["object"]))[0]
+
+
+def spatial_diagnostics_for_object(
+    obj: Mapping[str, Any],
+    objects: Iterable[Mapping[str, Any]],
+    *,
+    scene_bounds: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    records = [record for record in objects if isinstance(record, Mapping)]
+    issues: list[str] = []
+    suggested_repairs: list[dict[str, Any]] = []
+    nearest_support: dict[str, Any] | None = None
+    deepest_intersection: dict[str, Any] | None = None
+    nearest_clearance: dict[str, Any] | None = None
+    target_name = name_of(obj)
+
+    if object_type(obj) != "MESH" or is_floor_like(obj) or is_wall_like(obj):
+        return {
+            "issues": issues,
+            "severity": 0,
+            "nearest_support": nearest_support,
+            "deepest_intersection": deepest_intersection,
+            "nearest_clearance": nearest_clearance,
+            "suggested_repairs": suggested_repairs,
+        }
+
+    target_bounds = world_bounds(obj)
+    supports = _support_candidates_for_object(obj, records)
+    contact_supports = [support for support in supports if abs(float(support["gap"])) <= CONTACT_TOLERANCE]
+    nearest_support = supports[0] if supports else None
+
+    if target_bounds["min"][2] > CONTACT_TOLERANCE and not contact_supports:
+        issues.extend(["floating", "unsupported"])
+        repair_params: dict[str, Any] = {"target": target_name}
+        if nearest_support is not None:
+            repair_params["support"] = nearest_support["object"]
+        suggested_repairs.append({"tool": "object.snap_to_support", "params": repair_params})
+
+    floor_supports = [support for support in supports if bool(support.get("is_floor_like"))]
+    nearby_floors: list[dict[str, Any]] = list(floor_supports)
+    for candidate in records:
+        candidate_name = name_of(candidate)
+        if not candidate_name or candidate_name == target_name or not is_floor_like(candidate):
+            continue
+        candidate_bounds = world_bounds(candidate)
+        gap = float(target_bounds["min"][2] - candidate_bounds["max"][2])
+        if abs(gap) > NEAR_TOLERANCE:
+            continue
+        if any(item["object"] == candidate_name for item in nearby_floors):
+            continue
+        nearby_floors.append(
+            {
+                "object": candidate_name,
+                "gap": gap,
+                "overlap_area": bounds_overlap_area_xy(target_bounds, candidate_bounds),
+                "contains_xy": bounds_contains_xy(candidate_bounds, target_bounds),
+                "is_floor_like": True,
+            }
+        )
+    nearby_floors = sorted(nearby_floors, key=lambda item: (abs(float(item["gap"])), -float(item["overlap_area"]), item["object"]))
+    if nearby_floors and not any(bool(support.get("contains_xy")) for support in nearby_floors):
+        issues.append("outside_support")
+        suggested_repairs.append(
+            {
+                "tool": "object.fit_inside",
+                "params": {"target": target_name, "container": nearby_floors[0]["object"], "align_bottom": True},
+            }
+        )
+
+    deepest_intersection = _deepest_intersection(obj, records)
+    if deepest_intersection is not None:
+        issues.append("deep_intersection")
+        suggested_repairs.append(
+            {
+                "tool": "object.resolve_overlap",
+                "params": {"target": target_name, "obstacle": deepest_intersection["object"]},
+            }
+        )
+
+    nearest_clearance = _nearest_clearance(obj, records)
+    if nearest_clearance is not None and float(nearest_clearance["gap"]) <= 0.1:
+        issues.append("crowded")
+
+    if scene_bounds is not None and len(records) >= 3:
+        scene_extents = bounds_extents(scene_bounds)
+        target_extents = bounds_extents(target_bounds)
+        if (
+            scene_extents[0] > 0.0
+            and scene_extents[1] > 0.0
+            and scene_extents[2] > 0.0
+            and target_extents[0] / scene_extents[0] >= 0.65
+            and target_extents[1] / scene_extents[1] >= 0.65
+            and target_extents[2] / scene_extents[2] >= 0.55
+        ):
+            issues.append("oversized_blocking_form")
+
+    issue_weights = {
+        "deep_intersection": 3,
+        "floating": 2,
+        "outside_support": 2,
+        "unsupported": 2,
+        "oversized_blocking_form": 2,
+        "crowded": 1,
+    }
+    return {
+        "issues": _dedupe_relations(issues),
+        "severity": sum(issue_weights.get(issue, 1) for issue in _dedupe_relations(issues)),
+        "nearest_support": nearest_support,
+        "deepest_intersection": deepest_intersection,
+        "nearest_clearance": nearest_clearance,
+        "suggested_repairs": suggested_repairs,
+    }
+
+
+def spatial_diagnostics(objects: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    records = sorted(
+        [obj for obj in objects if isinstance(obj, Mapping) and isinstance(obj.get("name"), str)],
+        key=lambda item: str(item.get("name", "")),
+    )
+    scene_bounds = _scene_bounds_from_records(records)
+    by_object: dict[str, dict[str, Any]] = {}
+    top_issues: list[dict[str, Any]] = []
+    for obj in records:
+        name = str(obj.get("name", "")).strip()
+        if not name:
+            continue
+        diagnostics = spatial_diagnostics_for_object(obj, records, scene_bounds=scene_bounds)
+        by_object[name] = diagnostics
+        for issue in diagnostics.get("issues", []):
+            top_issues.append(
+                {
+                    "object": name,
+                    "issue": issue,
+                    "severity": diagnostics.get("severity", 0),
+                    "suggested_repairs": diagnostics.get("suggested_repairs", []),
+                }
+            )
+    top_issues = sorted(top_issues, key=lambda item: (-int(item.get("severity", 0)), item["object"], item["issue"]))
+    return {
+        "issue_count": len(top_issues),
+        "top_issues": top_issues[:3],
+        "by_object": by_object,
+    }
+
+
 def place_on_surface_location(
     target_bounds: Mapping[str, Any],
     reference_bounds: Mapping[str, Any],
