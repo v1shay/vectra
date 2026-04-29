@@ -412,7 +412,7 @@ class ReferenceResolver:
                 guessed = [base[0] + width + 0.5, base[1], base[2]]
             elif tool_name == "light.create":
                 guessed = [base[0] + 4.0, base[1] - 4.0, base[2] + 6.0]
-            elif tool_name == "camera.ensure":
+            elif tool_name in {"camera.ensure", "camera.adjust"}:
                 guessed = [base[0] + 8.0, base[1] - 8.0, base[2] + 6.0]
             else:
                 guessed = list(base)

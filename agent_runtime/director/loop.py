@@ -172,8 +172,19 @@ def _contains_action_ref(value: Any) -> bool:
     return False
 
 
+def _invalid_coordinate_ref(value: Any) -> str | None:
+    if _is_action_ref(value):
+        raw_ref = str(value.get("$ref", "")).strip()
+        if raw_ref.endswith(".location"):
+            return raw_ref
+    return None
+
+
 def _refs_as_validation_placeholders(value: Any) -> Any:
     if _is_action_ref(value):
+        raw_ref = str(value.get("$ref", "")).strip()
+        if raw_ref.endswith(".location"):
+            return [0.0, 0.0, 0.0]
         return "__pending_action_ref__"
     if isinstance(value, Mapping):
         return {
@@ -563,13 +574,21 @@ class DirectorLoop:
                 continue
 
             try:
-                normalized_params = normalize_action_params(tool, tool_call.arguments)
+                raw_arguments = dict(tool_call.arguments)
+                validation_arguments = (
+                    _refs_as_validation_placeholders(raw_arguments)
+                    if _contains_action_ref(raw_arguments)
+                    else raw_arguments
+                )
+                normalized_params = normalize_action_params(tool, validation_arguments)
                 normalized_arguments = tool.validate_params(normalized_params.params)
             except ToolValidationError as exc:
                 issues.append(ToolCallValidationIssue(tool_name=tool_call.name, reason=str(exc)))
                 continue
 
             validated.append(ToolCall(name=tool_call.name, arguments=normalized_arguments))
+            if _contains_action_ref(tool_call.arguments):
+                validated[-1] = ToolCall(name=tool_call.name, arguments=dict(tool_call.arguments))
             actionable_families.append(_tool_family(tool_call.name))
 
         actionable_count = sum(
@@ -829,10 +848,29 @@ class DirectorLoop:
             target_result = resolver.resolve_target(args.get("target"))
             if tool_call.name != "light.create":
                 assumptions.extend(target_result.assumptions)
+            look_at_result = None
+            if tool_call.name == "camera.adjust" and args.get("look_at") is not None:
+                look_at_result = resolver.resolve_target(args.get("look_at"))
+                assumptions.extend(look_at_result.assumptions)
             resolved_location = None
             if tool_call.name in {"light.create", "camera.ensure", "light.adjust", "camera.adjust"}:
-                target_name = target_result.value if isinstance(target_result.value, str) else None
-                resolved_location = resolver.resolve_location(tool_call.name, args.get("location"), target_name=target_name)
+                raw_location = args.get("location")
+                invalid_ref = _invalid_coordinate_ref(raw_location)
+                if invalid_ref is not None:
+                    assumptions.append(
+                        AssumptionRecord(
+                            key="location",
+                            value=None,
+                            reason=(
+                                f"Ignored invalid coordinate reference '{invalid_ref}' and inferred a valid "
+                                "presentation location from scene geometry."
+                            ),
+                        )
+                    )
+                    raw_location = None
+                anchor_target = look_at_result.value if look_at_result is not None and isinstance(look_at_result.value, str) else target_result.value
+                target_name = anchor_target if isinstance(anchor_target, str) else None
+                resolved_location = resolver.resolve_location(tool_call.name, raw_location, target_name=target_name)
                 assumptions.extend(resolved_location.assumptions)
                 metadata["reference_anchor"] = resolved_location.metadata.get("anchor")
             params = dict(args)
@@ -840,9 +878,21 @@ class DirectorLoop:
                 params["target"] = target_result.value
             if resolved_location is not None:
                 params["location"] = resolved_location.value
-            if tool_call.name == "camera.adjust" and args.get("look_at") is not None:
-                look_at_result = resolver.resolve_target(args.get("look_at"))
-                assumptions.extend(look_at_result.assumptions)
+            if tool_call.name == "object.keyframe":
+                invalid_ref = _invalid_coordinate_ref(args.get("value"))
+                if invalid_ref is not None:
+                    params.pop("value", None)
+                    assumptions.append(
+                        AssumptionRecord(
+                            key="value",
+                            value=None,
+                            reason=(
+                                f"Ignored invalid keyframe value reference '{invalid_ref}' and keyframed the "
+                                "target's current transform value."
+                            ),
+                        )
+                    )
+            if tool_call.name == "camera.adjust" and look_at_result is not None:
                 params[target_key] = look_at_result.value
             return (
                 [{"action_id": action_id, "tool": tool_call.name, "params": _drop_none_values(params)}],
