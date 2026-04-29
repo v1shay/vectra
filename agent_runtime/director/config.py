@@ -42,6 +42,8 @@ class RuntimeConfig:
     ollama_host: str
     ollama_primary_model: str
     ollama_secondary_model: str
+    audit_mode: bool
+    disable_provider_fallback: bool
 
 
 def _normalize_http_url(raw_value: str) -> str:
@@ -71,6 +73,13 @@ def _read_int_env(name: str, default: int) -> int:
         return max(int(raw_value), 0)
     except ValueError:
         return default
+
+
+def _read_bool_env(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name, "").strip().lower()
+    if not raw_value:
+        return default
+    return raw_value in {"1", "true", "yes", "on"}
 
 
 def _read_endpoint(
@@ -142,6 +151,8 @@ def load_runtime_config() -> RuntimeConfig:
         transport=DEFAULT_DIRECTOR_TRANSPORT,
         transport_vars=("VECTRA_DIRECTOR_TRANSPORT",),
     )
+    audit_mode = _read_bool_env("VECTRA_DIRECTOR_AUDIT_MODE", False)
+    disable_provider_fallback = _read_bool_env("VECTRA_DISABLE_PROVIDER_FALLBACK", audit_mode)
     return RuntimeConfig(
         controller=controller,
         director=director,
@@ -184,4 +195,6 @@ def load_runtime_config() -> RuntimeConfig:
             "",
         ).strip()
         or DEFAULT_OLLAMA_SECONDARY,
+        audit_mode=audit_mode,
+        disable_provider_fallback=disable_provider_fallback,
     )
