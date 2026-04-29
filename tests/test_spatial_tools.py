@@ -11,8 +11,10 @@ from vectra.tools.floor_tools import EnsureFloorTool
 from vectra.tools.registry import ToolRegistry
 from vectra.tools.spatial import (
     all_face_centers,
+    bounds_intersection_extents,
     floor_contact_record,
     is_wall_like,
+    spatial_diagnostics,
     spatial_anchors,
     spatial_metadata_for_object,
     spatial_relations,
@@ -20,7 +22,15 @@ from vectra.tools.spatial import (
     lowest_z,
     world_bounds,
 )
-from vectra.tools.spatial_tools import PlaceAgainstTool, PlaceAtAnchorTool, PlaceOnSurfaceTool, PlaceRelativeTool
+from vectra.tools.spatial_tools import (
+    FitInsideTool,
+    PlaceAgainstTool,
+    PlaceAtAnchorTool,
+    PlaceOnSurfaceTool,
+    PlaceRelativeTool,
+    ResolveOverlapTool,
+    SnapToSupportTool,
+)
 
 
 def _mesh(name: str, *, location: tuple[float, float, float], dimensions: tuple[float, float, float]) -> SimpleNamespace:
@@ -159,6 +169,9 @@ def test_tool_registry_discovers_spatial_phase_a_tools() -> None:
     assert "object.place_relative" in discovered_tools
     assert "object.align_to" in discovered_tools
     assert "object.place_at_anchor" in discovered_tools
+    assert "object.snap_to_support" in discovered_tools
+    assert "object.resolve_overlap" in discovered_tools
+    assert "object.fit_inside" in discovered_tools
     assert "scene.ensure_floor" in discovered_tools
 
 
@@ -176,6 +189,20 @@ def test_place_on_surface_tool_grounds_target_on_reference_top(monkeypatch) -> N
     assert target.location == (0.0, 0.0, 1.0)
     assert result.outputs["placement_mode"] == "surface_contact"
     assert result.outputs["reference_object"] == "Floor"
+
+
+def test_place_on_surface_accepts_vector_offset_without_scalar_conflict(monkeypatch) -> None:
+    target = _mesh("Target", location=(0.0, 0.0, 0.0), dimensions=(2.0, 2.0, 2.0))
+    reference = _mesh("Floor", location=(0.0, 0.0, 0.0), dimensions=(8.0, 8.0, 0.0))
+
+    _patch_spatial_runtime(monkeypatch)
+
+    PlaceOnSurfaceTool().execute(
+        context=_context(target, reference),
+        params={"target": "Target", "reference": "Floor", "surface": "top", "offset_vector": [1.0, -0.5, 0.25]},
+    )
+
+    assert target.location == (1.0, -0.5, 1.25)
 
 
 def test_place_against_preserves_grounded_axes_for_bed_against_wall(monkeypatch) -> None:
@@ -250,7 +277,7 @@ def test_spatial_tools_reject_invalid_relation_parameters() -> None:
         )
     with pytest.raises(ToolValidationError, match="'offset' must be greater than or equal to 0"):
         PlaceAgainstTool().validate_params({"target": "A", "reference": "B", "side": "front", "offset": -0.1})
-    with pytest.raises(ToolValidationError, match="'target' must be a non-empty string"):
+    with pytest.raises(ToolValidationError, match="Invalid param"):
         PlaceOnSurfaceTool().validate_params({"target": None, "reference": "B", "surface": "top"})
 
 
@@ -278,6 +305,44 @@ def test_place_at_anchor_uses_derived_floor_corner_without_scene_template(monkey
     assert plant.location == (-2.75, -2.75, 0.5)
     assert result.outputs["placement_mode"] == "anchor_placement"
     assert result.outputs["anchor"] == "Floor.floor.corner.left.back"
+
+
+def test_spatial_diagnostics_detect_floating_overlap_and_outside_support() -> None:
+    floor = {"name": "Floor", "type": "MESH", "bounds": {"min": [-2.0, -2.0, 0.0], "max": [2.0, 2.0, 0.0]}}
+    floating = {"name": "Floating", "type": "MESH", "bounds": {"min": [-0.5, -0.5, 2.0], "max": [0.5, 0.5, 3.0]}}
+    overlap_a = {"name": "OverlapA", "type": "MESH", "bounds": {"min": [-0.5, -0.5, 0.0], "max": [0.7, 0.7, 1.0]}}
+    overlap_b = {"name": "OverlapB", "type": "MESH", "bounds": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}}
+    outside = {"name": "Outside", "type": "MESH", "bounds": {"min": [1.8, 0.0, 0.0], "max": [2.8, 1.0, 1.0]}}
+
+    diagnostics = spatial_diagnostics([floor, floating, overlap_a, overlap_b, outside])
+
+    assert "floating" in diagnostics["by_object"]["Floating"]["issues"]
+    assert "unsupported" in diagnostics["by_object"]["Floating"]["issues"]
+    assert "deep_intersection" in diagnostics["by_object"]["OverlapA"]["issues"]
+    assert "outside_support" in diagnostics["by_object"]["Outside"]["issues"]
+    assert diagnostics["top_issues"]
+
+
+def test_repair_tools_snap_resolve_and_fit_with_generic_bounds(monkeypatch) -> None:
+    floor = _mesh("Floor", location=(0.0, 0.0, 0.0), dimensions=(4.0, 4.0, 0.0))
+    floating = _mesh("Floating", location=(0.0, 0.0, 4.0), dimensions=(1.0, 1.0, 1.0))
+    overlap = _mesh("Overlap", location=(0.25, 0.0, 0.5), dimensions=(1.0, 1.0, 1.0))
+    outside = _mesh("Outside", location=(3.0, 0.0, 0.5), dimensions=(1.0, 1.0, 1.0))
+    context = _context(floor, floating, overlap, outside)
+    _patch_spatial_runtime(monkeypatch)
+
+    snap_result = SnapToSupportTool().execute(context=context, params={"target": "Floating", "support": "Floor"})
+    assert snap_result.outputs["placement_mode"] == "support_snap"
+    assert world_bounds(floating)["min"][2] == pytest.approx(world_bounds(floor)["max"][2])
+
+    resolve_result = ResolveOverlapTool().execute(context=context, params={"target": "Overlap", "obstacle": "Floating"})
+    assert resolve_result.outputs["placement_mode"] == "overlap_resolution"
+    assert min(bounds_intersection_extents(world_bounds(floating), world_bounds(overlap))) <= 0.05
+
+    fit_result = FitInsideTool().execute(context=context, params={"target": "Outside", "container": "Floor", "align_bottom": True})
+    assert fit_result.outputs["placement_mode"] == "fit_inside"
+    assert world_bounds(outside)["max"][0] <= world_bounds(floor)["max"][0] + 0.001
+    assert world_bounds(outside)["min"][2] == pytest.approx(world_bounds(floor)["max"][2])
 
 
 def test_ensure_floor_normalizes_existing_floor_candidate(monkeypatch) -> None:
