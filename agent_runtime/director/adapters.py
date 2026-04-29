@@ -454,6 +454,7 @@ class StructuredResponsesAdapter(HttpJsonProviderAdapter):
         structured_tools=True,
         embeds_tools_in_prompt=False,
         supports_parallel_tool_calls=True,
+        supports_image_input=True,
     )
 
     def build_request(self, endpoint: EndpointConfig, request: ProviderRequest) -> ProviderHttpRequest:
