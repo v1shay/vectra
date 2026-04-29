@@ -86,8 +86,80 @@ def _apply_alias_repairs(tool: BaseTool, params: dict[str, Any]) -> tuple[dict[s
     return normalized, repairs
 
 
+def _apply_value_repairs(tool: BaseTool, params: dict[str, Any]) -> tuple[dict[str, Any], list[ParamRepair]]:
+    repairs: list[ParamRepair] = []
+    normalized = dict(params)
+
+    if tool.name == "mesh.create_primitive":
+        primitive_aliases = {
+            "block": "cube",
+            "box": "cube",
+            "rectangular_prism": "cube",
+            "rectangular prism": "cube",
+        }
+        for field_name in ("type", "primitive_type"):
+            value = normalized.get(field_name)
+            if not isinstance(value, str):
+                continue
+            alias = value.strip().lower()
+            repaired = primitive_aliases.get(alias)
+            if repaired is None:
+                continue
+            normalized[field_name] = repaired
+            repairs.append(
+                ParamRepair(
+                    field=field_name,
+                    reason=f"Normalized primitive alias '{value}' to '{repaired}'",
+                )
+            )
+
+    if tool.name == "object.place_relative":
+        relation_aliases = {
+            "back": "behind",
+            "front": "in_front_of",
+            "left": "left_of",
+            "right": "right_of",
+        }
+        value = normalized.get("relation")
+        if isinstance(value, str):
+            alias = value.strip().lower()
+            repaired = relation_aliases.get(alias)
+            if repaired is not None:
+                normalized["relation"] = repaired
+                repairs.append(
+                    ParamRepair(
+                        field="relation",
+                        reason=f"Normalized relation alias '{value}' to '{repaired}'",
+                    )
+                )
+
+    if tool.name in {"object.place_on_surface", "object.place_against"}:
+        offset = normalized.get("offset")
+        if "offset_vector" not in normalized and _looks_like_vector3(offset):
+            normalized["offset_vector"] = offset
+            normalized.pop("offset", None)
+            repairs.append(
+                ParamRepair(
+                    field="offset_vector",
+                    reason="Moved vector offset into 'offset_vector'",
+                )
+            )
+
+    return normalized, repairs
+
+
+def _looks_like_vector3(value: Any) -> bool:
+    if isinstance(value, (str, bytes, bytearray)):
+        return False
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return False
+    return True
+
+
 def normalize_action_params(tool: BaseTool, params: Mapping[str, Any]) -> NormalizedParams:
     normalized, repairs = _apply_alias_repairs(tool, dict(params))
+    normalized, value_repairs = _apply_value_repairs(tool, normalized)
+    repairs.extend(value_repairs)
     normalized, dropped_repairs = _drop_absent_optional_fields(tool, normalized)
     repairs.extend(dropped_repairs)
 
