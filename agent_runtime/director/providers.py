@@ -218,6 +218,8 @@ def _director_candidates(runtime) -> list[EndpointConfig]:
     candidates: list[EndpointConfig] = []
     if runtime.director is not None:
         candidates.append(runtime.director)
+    if getattr(runtime, "disable_provider_fallback", False):
+        return candidates
     if runtime.controller is not None:
         candidates.append(
             EndpointConfig(
