@@ -88,6 +88,7 @@ class ProviderAdapterCapabilities:
     structured_tools: bool = True
     embeds_tools_in_prompt: bool = False
     supports_parallel_tool_calls: bool = True
+    supports_image_input: bool = False
 
 
 @dataclass(frozen=True)

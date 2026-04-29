@@ -12,6 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in plain Python test
 from vectra.tools.spatial import (
     bounds_to_lists,
     spatial_anchors,
+    spatial_diagnostics,
     spatial_metadata_for_object,
     spatial_relations,
     world_bounds,
@@ -183,6 +184,12 @@ def _attach_spatial_metadata(objects: list[dict[str, Any]]) -> None:
     for obj in objects:
         obj["relations"] = relations_by_source.get(str(obj.get("name", "")), [])
 
+    diagnostics = spatial_diagnostics(objects)
+    by_object = diagnostics.get("by_object", {})
+    if isinstance(by_object, dict):
+        for obj in objects:
+            obj["spatial_diagnostics"] = by_object.get(str(obj.get("name", "")), {"issues": [], "severity": 0})
+
 
 def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
     if bpy is None:
@@ -231,6 +238,7 @@ def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
         objects.append(object_record)
 
     _attach_spatial_metadata(objects)
+    diagnostics = spatial_diagnostics(objects)
 
     active_camera = getattr(scene, "camera", None)
     lights = [
@@ -255,6 +263,10 @@ def build_scene_state(context: bpy.types.Context) -> dict[str, Any]:
         "scene_bounds": bounds,
         "spatial_anchors": spatial_anchors(objects),
         "spatial_relations": spatial_relations(objects),
+        "spatial_diagnostics": {
+            "issue_count": diagnostics.get("issue_count", 0),
+            "top_issues": diagnostics.get("top_issues", []),
+        },
         "groups": _collection_groups(scene),
         "lights": lights,
         "objects": objects,
