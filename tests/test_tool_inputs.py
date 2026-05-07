@@ -12,6 +12,7 @@ from vectra.tools.base import ToolValidationError
 from vectra.tools.camera_tools import EnsureCameraTool
 from vectra.tools.light_tools import CreateLightTool
 from vectra.tools.mesh_tools import CreatePrimitiveTool
+from vectra.tools.modifier_tools import AddModifierTool
 from vectra.tools.object_tools import DuplicateObjectTool
 from vectra.tools.spatial_tools import PlaceOnSurfaceTool, PlaceRelativeTool
 from vectra.tools.transform_tools import TransformObjectTool
@@ -46,6 +47,19 @@ def test_execution_normalization_accepts_common_model_spatial_aliases() -> None:
     assert relation.params["relation"] == "in_front_of"
     assert surface.params["offset_vector"] == [1, 0, 0]
     assert "offset" not in surface.params
+
+
+def test_execution_normalization_accepts_common_modifier_aliases() -> None:
+    tool = AddModifierTool()
+
+    normalized = normalize_action_params(
+        tool,
+        {"target": "LampShade", "modifier_type": "subdivision_surface", "levels": "2"},
+    )
+    validated = tool.validate_params(normalized.params)
+
+    assert validated["modifier_type"] == "SUBSURF"
+    assert validated["levels"] == 2
 
 
 def test_create_primitive_rejects_invalid_scale() -> None:
