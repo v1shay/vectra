@@ -561,9 +561,156 @@ class StructuredResponsesAdapter(HttpJsonProviderAdapter):
         )
 
 
+class ChatCompletionsAdapter(HttpJsonProviderAdapter):
+    capabilities = ProviderAdapterCapabilities(
+        structured_tools=True,
+        embeds_tools_in_prompt=False,
+        supports_parallel_tool_calls=True,
+    )
+
+    def build_request(self, endpoint: EndpointConfig, request: ProviderRequest) -> ProviderHttpRequest:
+        instructions = request.instructions
+        if request.corrective_hint:
+            instructions = f"{instructions}\n\n{request.corrective_hint}"
+        max_tokens = max(_responses_max_output_tokens(len(request.tools)), 2048 if request.tools else 256)
+        messages = [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": _chat_user_content(request.user_input)},
+        ]
+        payload: dict[str, Any] = {
+            "model": endpoint.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        if request.tools:
+            payload["tools"] = [_chat_tool_schema(tool) for tool in request.tools]
+            payload["tool_choice"] = "required"
+        return ProviderHttpRequest(
+            path="/chat/completions",
+            payload=payload,
+            request_metadata={
+                "path": "/chat/completions",
+                "tool_count": len(request.tools),
+                "input_chars": _serialized_length(request.user_input),
+                "instruction_chars": len(instructions),
+                "structured_tools": True,
+                "prompt_embeds_tools": False,
+                "max_tokens": payload["max_tokens"],
+            },
+        )
+
+    def parse_response(self, raw_response: dict[str, Any]) -> ParsedProviderResponse:
+        assistant_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        invalid_tool_calls = 0
+        choices = raw_response.get("choices")
+        if not isinstance(choices, list):
+            choices = []
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                assistant_parts.append(content.strip())
+            raw_tool_calls = message.get("tool_calls")
+            if not isinstance(raw_tool_calls, list):
+                continue
+            for raw_tool_call in raw_tool_calls:
+                if not isinstance(raw_tool_call, dict):
+                    invalid_tool_calls += 1
+                    continue
+                function = raw_tool_call.get("function")
+                if not isinstance(function, dict):
+                    invalid_tool_calls += 1
+                    continue
+                name = function.get("name")
+                arguments = function.get("arguments", {})
+                if not isinstance(name, str) or not name.strip():
+                    invalid_tool_calls += 1
+                    continue
+                if isinstance(arguments, str):
+                    parsed_arguments, success = _extract_json_object(arguments)
+                    if not success:
+                        invalid_tool_calls += 1
+                        continue
+                elif isinstance(arguments, dict):
+                    parsed_arguments = arguments
+                else:
+                    invalid_tool_calls += 1
+                    continue
+                tool_calls.append(ToolCall(name=name.strip(), arguments=parsed_arguments))
+
+        assistant_text = "\n".join(part for part in assistant_parts if part).strip()
+        if tool_calls:
+            return ParsedProviderResponse(
+                assistant_text=assistant_text,
+                tool_calls=tool_calls,
+                response_type=_response_type_for_tool_name(tool_calls[0].name),
+                parse_status="ok",
+                raw_response=raw_response,
+            )
+        if invalid_tool_calls:
+            return ParsedProviderResponse(
+                assistant_text=assistant_text,
+                response_type="malformed_tool_calls",
+                parse_status="tool_call_parse_failure",
+                failure_reason="Provider returned malformed chat tool calls.",
+                raw_response=raw_response,
+            )
+        response_type = "message_only" if assistant_text else "empty"
+        return ParsedProviderResponse(
+            assistant_text=assistant_text,
+            response_type=response_type,
+            parse_status="no_action_response",
+            failure_reason="Provider returned no tool calls.",
+            raw_response=raw_response,
+        )
+
+
+def _chat_user_content(user_input: str | list[dict[str, Any]]) -> str:
+    if isinstance(user_input, str):
+        return user_input
+    parts: list[str] = []
+    for item in user_input:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for content_item in content:
+            if not isinstance(content_item, dict):
+                continue
+            text = content_item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n".join(parts).strip()
+
+
+def _chat_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.get("name", ""),
+            "description": tool.get("description", ""),
+            "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+        },
+    }
+
+
 class OpenAIResponsesAdapter(StructuredResponsesAdapter):
     family = "openai"
     transport = "responses"
+
+
+class OpenAIChatCompletionsAdapter(ChatCompletionsAdapter):
+    family = "openai"
+    transport = "chat_completions"
 
 
 class XAIResponsesAdapter(StructuredResponsesAdapter):
@@ -705,6 +852,7 @@ def reset_provider_adapters() -> None:
 def register_default_provider_adapters() -> None:
     for adapter in (
         OpenAIResponsesAdapter(),
+        OpenAIChatCompletionsAdapter(),
         XAIResponsesAdapter(),
         OllamaJsonEnvelopeAdapter(),
     ):
