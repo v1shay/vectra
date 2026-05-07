@@ -502,3 +502,44 @@ def test_invalid_tool_after_retry_returns_tool_validation_failure(monkeypatch) -
     assert turn.metadata["runtime_state"] == "tool_validation_failure"
     assert turn.metadata["validation_retry_used"] is True
     assert "mesh.create_cylinder" in turn.metadata["failure_reason"]
+
+
+def test_director_normalizes_common_modifier_alias_before_retry(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_controller",
+        lambda prompt, scene_state: ControllerDecision(),
+    )
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_director",
+        lambda prompt_text, tools, allow_complete=False: ProviderResult(
+            provider="ollama-primary",
+            model="qwen2.5-coder:32b",
+            parsed=ParsedProviderResponse(
+                assistant_text="I will build the first coherent batch.",
+                tool_calls=[
+                    ToolCall(name="scene.ensure_floor", arguments={}),
+                    ToolCall(
+                        name="mesh.create_primitive",
+                        arguments={"primitive_type": "cylinder", "name": "focal_object_base"},
+                    ),
+                    ToolCall(
+                        name="object.add_modifier",
+                        arguments={
+                            "target": "focal_object_base",
+                            "modifier_type": "subdivision_surface",
+                            "levels": 2,
+                        },
+                    ),
+                ],
+                response_type="tool_calls",
+            ),
+            runtime_state="valid_action_batch_ready",
+        ),
+    )
+
+    turn = DirectorLoop().step(_context("create a compact interior vignette"))
+
+    assert turn.status == "ok"
+    assert turn.metadata["validation_retry_used"] is False
+    assert turn.metadata["actions"][2]["tool"] == "object.add_modifier"
+    assert turn.metadata["actions"][2]["params"]["modifier_type"] == "SUBSURF"
