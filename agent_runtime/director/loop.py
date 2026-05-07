@@ -433,6 +433,26 @@ def _tool_validation_summary(issues: list[ToolCallValidationIssue]) -> str:
     return "; ".join(f"{issue.tool_name}: {issue.reason}" for issue in issues[:4])
 
 
+def _only_coordinated_batch_pressure(issues: list[ToolCallValidationIssue]) -> bool:
+    return bool(issues) and all(
+        "coordinated batch of 2 to 4 tool calls" in issue.reason
+        for issue in issues
+    )
+
+
+def _salvageable_progress_batch(
+    validated_tool_calls: list[ToolCall],
+    issues: list[ToolCallValidationIssue],
+) -> list[ToolCall]:
+    if not validated_tool_calls or not _only_coordinated_batch_pressure(issues):
+        return []
+    return [
+        tool_call
+        for tool_call in validated_tool_calls
+        if tool_call.name not in {"task.complete", "task.clarify"}
+    ][:1]
+
+
 def _needs_coordinated_batch(context: DirectorContext) -> bool:
     prompt = context.user_prompt.strip().lower()
     if not prompt:
@@ -998,6 +1018,7 @@ class DirectorLoop:
             if validation_issues:
                 if validation_retry_used:
                     break
+                salvage_tool_calls = _salvageable_progress_batch(validated_tool_calls, validation_issues)
                 validation_retry_used = True
                 log_structured(
                     _LOGGER,
@@ -1019,6 +1040,24 @@ class DirectorLoop:
                         screenshot=context.screenshot,
                     )
                 except ProviderError as exc:
+                    if salvage_tool_calls:
+                        actions, assumptions, metadata, code = self._resolve_tool_calls(salvage_tool_calls, context)
+                        validated_actions, action_issues = self._validate_resolved_actions(actions)
+                        if not action_issues:
+                            assumptions.append(
+                                AssumptionRecord(
+                                    key="validation_retry_failed",
+                                    value="accepted_safe_single_action",
+                                    reason=(
+                                        "Accepted the original schema-valid action because the corrective "
+                                        "batch retry failed at the provider boundary."
+                                    ),
+                                )
+                            )
+                            tool_calls = salvage_tool_calls
+                            actions = validated_actions
+                            validation_issues = []
+                            break
                     return _provider_error_turn(exc, budget_state)
                 provider_attempts.extend(provider_result.attempts)
                 provider_chain = _merge_provider_chains(
