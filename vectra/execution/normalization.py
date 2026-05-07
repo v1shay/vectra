@@ -113,6 +113,29 @@ def _apply_value_repairs(tool: BaseTool, params: dict[str, Any]) -> tuple[dict[s
                 )
             )
 
+    if tool.name == "object.add_modifier":
+        modifier_aliases = {
+            "bevel": "BEVEL",
+            "solidify": "SOLIDIFY",
+            "subdivision": "SUBSURF",
+            "subdivision surface": "SUBSURF",
+            "subdivision_surface": "SUBSURF",
+            "subdivision-surface": "SUBSURF",
+            "subsurf": "SUBSURF",
+        }
+        value = normalized.get("modifier_type")
+        if isinstance(value, str):
+            alias = value.strip().lower()
+            repaired = modifier_aliases.get(alias)
+            if repaired is not None:
+                normalized["modifier_type"] = repaired
+                repairs.append(
+                    ParamRepair(
+                        field="modifier_type",
+                        reason=f"Normalized modifier alias '{value}' to '{repaired}'",
+                    )
+                )
+
     if tool.name == "object.place_relative":
         relation_aliases = {
             "back": "behind",
@@ -148,6 +171,36 @@ def _apply_value_repairs(tool: BaseTool, params: dict[str, Any]) -> tuple[dict[s
     return normalized, repairs
 
 
+def _apply_enum_repairs(tool: BaseTool, params: dict[str, Any]) -> tuple[dict[str, Any], list[ParamRepair]]:
+    repairs: list[ParamRepair] = []
+    normalized = dict(params)
+
+    for key, spec in tool.input_schema.items():
+        if key not in normalized or not isinstance(spec, dict):
+            continue
+        enum_values = spec.get("enum")
+        value = normalized.get(key)
+        if not isinstance(enum_values, list) or not isinstance(value, str) or value in enum_values:
+            continue
+        canonical_by_folded = {
+            str(enum_value).casefold(): enum_value
+            for enum_value in enum_values
+            if isinstance(enum_value, str)
+        }
+        repaired = canonical_by_folded.get(value.strip().casefold())
+        if repaired is None:
+            continue
+        normalized[key] = repaired
+        repairs.append(
+            ParamRepair(
+                field=key,
+                reason=f"Normalized enum casing for '{key}' from '{value}' to '{repaired}'",
+            )
+        )
+
+    return normalized, repairs
+
+
 def _looks_like_vector3(value: Any) -> bool:
     if isinstance(value, (str, bytes, bytearray)):
         return False
@@ -160,6 +213,8 @@ def normalize_action_params(tool: BaseTool, params: Mapping[str, Any]) -> Normal
     normalized, repairs = _apply_alias_repairs(tool, dict(params))
     normalized, value_repairs = _apply_value_repairs(tool, normalized)
     repairs.extend(value_repairs)
+    normalized, enum_repairs = _apply_enum_repairs(tool, normalized)
+    repairs.extend(enum_repairs)
     normalized, dropped_repairs = _drop_absent_optional_fields(tool, normalized)
     repairs.extend(dropped_repairs)
 
