@@ -70,7 +70,23 @@ class AgentService:
                 "assumptions": [item.model_dump() for item in response.assumptions],
                 "actions": [item.model_dump() for item in response.execution.actions],
                 "observation_summary": "",
-                "category": "director_loop",
+                "category": response.metadata.get("planner", "director_loop"),
+                "benchmark": response.metadata.get("benchmark", ""),
+                "failure_signature": self._failure_signature(response.metadata),
+                "metadata": response.metadata,
             }
         )
         return response
+
+    @staticmethod
+    def _failure_signature(metadata: dict[str, object]) -> str:
+        report = metadata.get("plan_execution_report")
+        if not isinstance(report, dict):
+            return ""
+        validation = report.get("validation")
+        if not isinstance(validation, dict):
+            return ""
+        failures = validation.get("failures")
+        if not isinstance(failures, list):
+            return ""
+        return " | ".join(str(item) for item in failures)

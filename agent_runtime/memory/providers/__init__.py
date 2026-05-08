@@ -2,10 +2,12 @@
 
 from .chroma import ChromaMemoryProvider
 from .in_memory import InMemoryMemoryProvider
+from .jsonl import JsonlMemoryProvider
 from .null import NullMemoryProvider
 
 __all__ = [
     "ChromaMemoryProvider",
     "InMemoryMemoryProvider",
+    "JsonlMemoryProvider",
     "NullMemoryProvider",
 ]
