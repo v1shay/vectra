@@ -131,6 +131,14 @@ def _response_type_for_tool_name(tool_name: str) -> str:
     return "tool_calls"
 
 
+def _chat_tool_name(tool_name: str) -> str:
+    return tool_name.replace(".", "__")
+
+
+def _vectra_tool_name(tool_name: str) -> str:
+    return tool_name.replace("__", ".")
+
+
 def _responses_max_output_tokens(tool_count: int) -> int:
     # Keep OpenRouter-compatible Responses requests inside a sane credit budget.
     return 1024 if tool_count else 512
@@ -664,7 +672,7 @@ class ChatCompletionsAdapter(HttpJsonProviderAdapter):
                 else:
                     invalid_tool_calls += 1
                     continue
-                tool_calls.append(ToolCall(name=name.strip(), arguments=parsed_arguments))
+                tool_calls.append(ToolCall(name=_vectra_tool_name(name.strip()), arguments=parsed_arguments))
 
         assistant_text = "\n".join(part for part in assistant_parts if part).strip()
         if tool_calls:
@@ -719,7 +727,7 @@ def _chat_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
-            "name": tool.get("name", ""),
+            "name": _chat_tool_name(str(tool.get("name", ""))),
             "description": tool.get("description", ""),
             "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
         },

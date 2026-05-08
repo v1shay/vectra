@@ -272,7 +272,7 @@ def test_chat_completions_adapter_builds_and_parses_tool_calls(monkeypatch) -> N
                                     "id": "call_1",
                                     "type": "function",
                                     "function": {
-                                        "name": "mesh.create_primitive",
+                                        "name": "mesh__create_primitive",
                                         "arguments": '{"type":"cube","name":"ProbeCube"}',
                                     },
                                 }
@@ -301,12 +301,77 @@ def test_chat_completions_adapter_builds_and_parses_tool_calls(monkeypatch) -> N
     )
 
     assert captured["url"] == "https://integrate.api.nvidia.com/v1/chat/completions"
-    assert captured["json"]["tools"][0]["function"]["name"] == "mesh.create_primitive"  # type: ignore[index]
+    assert captured["json"]["tools"][0]["function"]["name"] == "mesh__create_primitive"  # type: ignore[index]
     assert captured["json"]["tool_choice"] == "required"  # type: ignore[index]
     assert captured["json"]["max_tokens"] == 2048  # type: ignore[index]
     assert result.parsed is not None
     assert result.parsed.tool_calls[0].name == "mesh.create_primitive"
     assert result.parsed.tool_calls[0].arguments == {"type": "cube", "name": "ProbeCube"}
+
+
+def test_chat_completions_adapter_sanitizes_control_tool_names(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_post(url, *, headers, json, timeout):
+        del url, headers, timeout
+        captured["json"] = json
+        return _http_response(
+            200,
+            {
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "task__clarify",
+                                        "arguments": '{"question":"Which material?","reason":"Missing material."}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    endpoint = EndpointConfig(
+        provider="nvidia-director",
+        family="openai",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key="test-nvidia",
+        model="qwen/qwen2.5-coder-32b-instruct",
+        transport="chat_completions",
+    )
+    request = ProviderRequest(
+        instructions="You are the director.",
+        user_input="Create a cube.",
+        tools=[
+            {
+                "type": "function",
+                "name": "task.clarify",
+                "description": "Ask for clarification.",
+                "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+            }
+        ],
+    )
+
+    result = OpenAIChatCompletionsAdapter().invoke(
+        endpoint,
+        request,
+        timeout=3.0,
+        max_retries=0,
+    )
+
+    assert captured["json"]["tools"][0]["function"]["name"] == "task__clarify"  # type: ignore[index]
+    assert result.parsed is not None
+    assert result.parsed.tool_calls[0].name == "task.clarify"
+    assert result.parsed.response_type == "clarify"
 
 
 def _context(prompt: str = "make something cool"):
