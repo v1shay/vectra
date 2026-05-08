@@ -4,7 +4,7 @@ import os
 from typing import Any
 
 from .base import MemoryProvider
-from .providers import ChromaMemoryProvider, InMemoryMemoryProvider, NullMemoryProvider
+from .providers import ChromaMemoryProvider, InMemoryMemoryProvider, JsonlMemoryProvider, NullMemoryProvider
 
 _DEFAULT_PROVIDER = "in_memory"
 
@@ -31,6 +31,9 @@ class MemoryManager:
         provider_name = os.getenv("VECTRA_AGENT_MEMORY_PROVIDER", _DEFAULT_PROVIDER).strip().lower()
         if provider_name == "chroma":
             return ChromaMemoryProvider()
+        if provider_name == "jsonl":
+            path = os.getenv("VECTRA_AGENT_MEMORY_PATH", ".vectra/memory.jsonl").strip()
+            return JsonlMemoryProvider(path, enabled=True)
         if provider_name == "in_memory":
             return InMemoryMemoryProvider(enabled=True)
         return NullMemoryProvider()
