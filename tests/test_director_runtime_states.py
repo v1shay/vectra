@@ -661,7 +661,7 @@ def test_broad_prompt_single_action_triggers_validation_retry(monkeypatch) -> No
     assert len(turn.metadata["actions"]) == 2
 
 
-def test_broad_prompt_salvages_valid_single_action_when_retry_provider_fails(monkeypatch) -> None:
+def test_broad_prompt_rejects_single_action_when_retry_provider_fails(monkeypatch) -> None:
     monkeypatch.setattr(
         "agent_runtime.director.loop.call_controller",
         lambda prompt, scene_state: ControllerDecision(),
@@ -690,11 +690,10 @@ def test_broad_prompt_salvages_valid_single_action_when_retry_provider_fails(mon
 
     turn = DirectorLoop().step(_context("make a coherent cinematic room"))
 
-    assert turn.status == "ok"
+    assert turn.status == "error"
     assert calls == 2
-    assert turn.metadata["validation_retry_used"] is True
-    assert turn.metadata["actions"] == [{"action_id": "step_1", "tool": "scene.ensure_floor", "params": {}}]
-    assert turn.metadata["assumptions"][0]["value"] == "accepted_safe_single_action"
+    assert turn.metadata["runtime_state"] == "provider_deadline_exceeded"
+    assert turn.error == "retry timed out"
 
 
 def test_invalid_tool_after_retry_returns_tool_validation_failure(monkeypatch) -> None:
