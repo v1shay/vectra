@@ -149,6 +149,8 @@ def _get_execution_engine() -> ExecutionEngine:
 
     if _execution_engine is None:
         _execution_engine = ExecutionEngine()
+    else:
+        _execution_engine.registry.discover()
     return _execution_engine
 
 

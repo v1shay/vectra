@@ -60,6 +60,14 @@ def _link_to_collection(obj: Any, collection_name: str = "Vectra_MaintenanceBay"
             linked_collection.objects.unlink(obj)
 
 
+def _update_scene(context: Any) -> None:
+    api = _require_bpy()
+    view_layer = getattr(context, "view_layer", None) or getattr(api.context, "view_layer", None)
+    update = getattr(view_layer, "update", None)
+    if callable(update):
+        update()
+
+
 def _cube(
     context: Any,
     *,
@@ -90,9 +98,7 @@ def _cube(
     obj.data.materials.append(material)
     _tag(obj, role)
     _link_to_collection(obj)
-    scene = getattr(context, "scene", None) or api.context.scene
-    if scene is not None:
-        scene.update()
+    _update_scene(context)
     return obj
 
 

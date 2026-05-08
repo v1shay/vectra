@@ -444,13 +444,10 @@ def _salvageable_progress_batch(
     validated_tool_calls: list[ToolCall],
     issues: list[ToolCallValidationIssue],
 ) -> list[ToolCall]:
-    if not validated_tool_calls or not _only_coordinated_batch_pressure(issues):
+    del validated_tool_calls
+    if _only_coordinated_batch_pressure(issues):
         return []
-    return [
-        tool_call
-        for tool_call in validated_tool_calls
-        if tool_call.name not in {"task.complete", "task.clarify"}
-    ][:1]
+    return []
 
 
 def _needs_coordinated_batch(context: DirectorContext) -> bool:
