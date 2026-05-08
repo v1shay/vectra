@@ -123,6 +123,70 @@ def test_http_provider_retries_retryable_500_before_success(monkeypatch) -> None
     assert [item["status_code"] for item in result.attempt.response_metadata["transport_attempts"]] == [500, 200]
 
 
+def test_http_provider_retries_share_single_timeout_budget(monkeypatch) -> None:
+    responses = [
+        _http_response(500, {"error": {"message": "temporary failure"}}),
+        _http_response(
+            200,
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "mesh.create_primitive",
+                        "arguments": '{"type":"cube","name":"Cube"}',
+                    }
+                ]
+            },
+        ),
+    ]
+    time_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.5])
+    timeouts: list[float] = []
+
+    def fake_post(*args, **kwargs):
+        del args
+        timeouts.append(float(kwargs["timeout"]))
+        return responses.pop(0)
+
+    monkeypatch.setattr("agent_runtime.director.adapters.time.perf_counter", lambda: next(time_values))
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = OpenAIResponsesAdapter().invoke(
+        _endpoint(),
+        _responses_request(),
+        timeout=10.0,
+        max_retries=1,
+    )
+
+    assert result.parsed is not None
+    assert timeouts == [10.0, 8.0]
+    assert result.attempt.response_metadata["transport_attempts"][1]["request_timeout_seconds"] == 8.0
+
+
+def test_http_provider_stops_retries_when_timeout_budget_is_exhausted(monkeypatch) -> None:
+    time_values = iter([0.0, 0.0, 0.0, 3.0, 3.0])
+    calls: list[str] = []
+
+    def fake_post(*args, **kwargs):
+        del args, kwargs
+        calls.append("post")
+        return _http_response(500, {"error": {"message": "temporary failure"}})
+
+    monkeypatch.setattr("agent_runtime.director.adapters.time.perf_counter", lambda: next(time_values))
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = OpenAIResponsesAdapter().invoke(
+        _endpoint(),
+        _responses_request(),
+        timeout=3.0,
+        max_retries=1,
+    )
+
+    assert calls == ["post"]
+    assert result.parsed is None
+    assert result.attempt.runtime_state == "provider_deadline_exceeded"
+    assert result.attempt.response_metadata["timeout_budget_seconds"] == 3.0
+
+
 def test_http_provider_fail_fast_for_non_retryable_400(monkeypatch) -> None:
     calls: list[str] = []
 

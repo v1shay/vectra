@@ -304,8 +304,22 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
         last_error: Exception | None = None
         transport_attempts: list[dict[str, Any]] = []
         payload_preview = _payload_preview(http_request.payload)
+        timeout_budget = max(float(timeout), 0.001)
+        deadline_at = time.perf_counter() + timeout_budget
         self._set_last_transport_metadata({})
         for attempt in range(1, max_retries + 2):
+            remaining_timeout = max(deadline_at - time.perf_counter(), 0.0)
+            if remaining_timeout <= 0.0:
+                raise ProviderTimeoutError(
+                    f"provider request exceeded the {timeout_budget:.1f}s timeout budget before attempt {attempt}",
+                    runtime_state="provider_deadline_exceeded",
+                    response_metadata={
+                        "transport_attempts": transport_attempts,
+                        "retry_count": max(len(transport_attempts) - 1, 0),
+                        "payload_preview": payload_preview,
+                        "timeout_budget_seconds": timeout_budget,
+                    },
+                )
             started = time.perf_counter()
             log_structured(
                 _LOGGER,
@@ -315,6 +329,8 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                     "model": endpoint.model,
                     "transport": endpoint.transport,
                     "attempt": attempt,
+                    "request_timeout_seconds": round(remaining_timeout, 3),
+                    "timeout_budget_seconds": round(timeout_budget, 3),
                     **http_request.request_metadata,
                 },
             )
@@ -326,7 +342,7 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                     f"{endpoint.base_url}{http_request.path}",
                     headers=headers,
                     json=http_request.payload,
-                    timeout=timeout,
+                    timeout=remaining_timeout,
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -341,6 +357,8 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                         "retryable": False,
                         "failure_reason": "",
                         "payload_preview": payload_preview,
+                        "request_timeout_seconds": round(remaining_timeout, 3),
+                        "timeout_budget_seconds": round(timeout_budget, 3),
                     }
                 )
                 self._set_last_transport_metadata(
@@ -350,6 +368,7 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                         "status_code": int(response.status_code),
                         "elapsed_ms": elapsed_ms,
                         "payload_preview": payload_preview,
+                        "timeout_budget_seconds": timeout_budget,
                     }
                 )
                 log_structured(
@@ -386,6 +405,8 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                         "payload_preview": payload_preview,
                         "error_payload_preview": error_payload,
                         "error_type": exc.__class__.__name__,
+                        "request_timeout_seconds": round(remaining_timeout, 3),
+                        "timeout_budget_seconds": round(timeout_budget, 3),
                     }
                 )
                 response_metadata = {
@@ -397,6 +418,7 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                     "payload_preview": payload_preview,
                     "error_payload_preview": error_payload,
                     "error_type": exc.__class__.__name__,
+                    "timeout_budget_seconds": timeout_budget,
                 }
                 log_structured(
                     _LOGGER,
@@ -430,6 +452,7 @@ class HttpJsonProviderAdapter(BaseProviderAdapter):
                 "transport_attempts": transport_attempts,
                 "retry_count": max(len(transport_attempts) - 1, 0),
                 "payload_preview": payload_preview,
+                "timeout_budget_seconds": timeout_budget,
             },
         )
 
