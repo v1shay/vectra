@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agent_runtime.director.loop import DirectorLoop
+from agent_runtime.intelligence import plan_maintenance_bay_step
 
 from .models import AgentContext, ExecutionMode, ReasoningStep
 
@@ -41,6 +42,10 @@ def _make_reasoning(
 
 
 def reason_step(context: AgentContext) -> ReasoningStep:
+    planned_step = plan_maintenance_bay_step(context)
+    if planned_step is not None:
+        return planned_step
+
     turn = _DIRECTOR_LOOP.step(
         __import__("agent_runtime.director.models", fromlist=["DirectorContext"]).DirectorContext(
             user_prompt=context.user_prompt,
