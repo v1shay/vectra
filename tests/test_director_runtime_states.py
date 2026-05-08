@@ -25,6 +25,7 @@ from agent_runtime.director.models import (
     ProviderResult,
     ToolCall,
 )
+from agent_runtime.director.prompts import director_system_prompt
 
 
 class FakeAdapter:
@@ -60,6 +61,14 @@ def _endpoint() -> EndpointConfig:
         model="gpt-5.1",
         transport="responses",
     )
+
+
+def test_director_prompt_pins_blender_z_up_coordinate_policy() -> None:
+    prompt = director_system_prompt()
+
+    assert "Blender is Z-up" in prompt
+    assert "scale [10, 10, 0.1]" in prompt
+    assert "emit a coordinated batch of 2 to 4 tool calls" in prompt
 
 
 def _responses_request() -> ProviderRequest:
