@@ -25,6 +25,7 @@ from agent_runtime.director.models import (
     ProviderResult,
     ToolCall,
 )
+from agent_runtime.director.prompts import director_system_prompt
 
 
 class FakeAdapter:
@@ -60,6 +61,14 @@ def _endpoint() -> EndpointConfig:
         model="gpt-5.1",
         transport="responses",
     )
+
+
+def test_director_prompt_pins_blender_z_up_coordinate_policy() -> None:
+    prompt = director_system_prompt()
+
+    assert "Blender is Z-up" in prompt
+    assert "scale [10, 10, 0.1]" in prompt
+    assert "emit a coordinated batch of 2 to 4 tool calls" in prompt
 
 
 def _responses_request() -> ProviderRequest:
@@ -121,6 +130,70 @@ def test_http_provider_retries_retryable_500_before_success(monkeypatch) -> None
     assert result.parsed.tool_calls[0].name == "mesh.create_primitive"
     assert result.attempt.response_metadata["retry_count"] == 1
     assert [item["status_code"] for item in result.attempt.response_metadata["transport_attempts"]] == [500, 200]
+
+
+def test_http_provider_retries_share_single_timeout_budget(monkeypatch) -> None:
+    responses = [
+        _http_response(500, {"error": {"message": "temporary failure"}}),
+        _http_response(
+            200,
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "mesh.create_primitive",
+                        "arguments": '{"type":"cube","name":"Cube"}',
+                    }
+                ]
+            },
+        ),
+    ]
+    time_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.5])
+    timeouts: list[float] = []
+
+    def fake_post(*args, **kwargs):
+        del args
+        timeouts.append(float(kwargs["timeout"]))
+        return responses.pop(0)
+
+    monkeypatch.setattr("agent_runtime.director.adapters.time.perf_counter", lambda: next(time_values))
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = OpenAIResponsesAdapter().invoke(
+        _endpoint(),
+        _responses_request(),
+        timeout=10.0,
+        max_retries=1,
+    )
+
+    assert result.parsed is not None
+    assert timeouts == [10.0, 8.0]
+    assert result.attempt.response_metadata["transport_attempts"][1]["request_timeout_seconds"] == 8.0
+
+
+def test_http_provider_stops_retries_when_timeout_budget_is_exhausted(monkeypatch) -> None:
+    time_values = iter([0.0, 0.0, 0.0, 3.0, 3.0])
+    calls: list[str] = []
+
+    def fake_post(*args, **kwargs):
+        del args, kwargs
+        calls.append("post")
+        return _http_response(500, {"error": {"message": "temporary failure"}})
+
+    monkeypatch.setattr("agent_runtime.director.adapters.time.perf_counter", lambda: next(time_values))
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = OpenAIResponsesAdapter().invoke(
+        _endpoint(),
+        _responses_request(),
+        timeout=3.0,
+        max_retries=1,
+    )
+
+    assert calls == ["post"]
+    assert result.parsed is None
+    assert result.attempt.runtime_state == "provider_deadline_exceeded"
+    assert result.attempt.response_metadata["timeout_budget_seconds"] == 3.0
 
 
 def test_http_provider_fail_fast_for_non_retryable_400(monkeypatch) -> None:
@@ -208,7 +281,7 @@ def test_chat_completions_adapter_builds_and_parses_tool_calls(monkeypatch) -> N
                                     "id": "call_1",
                                     "type": "function",
                                     "function": {
-                                        "name": "mesh.create_primitive",
+                                        "name": "mesh__create_primitive",
                                         "arguments": '{"type":"cube","name":"ProbeCube"}',
                                     },
                                 }
@@ -237,12 +310,77 @@ def test_chat_completions_adapter_builds_and_parses_tool_calls(monkeypatch) -> N
     )
 
     assert captured["url"] == "https://integrate.api.nvidia.com/v1/chat/completions"
-    assert captured["json"]["tools"][0]["function"]["name"] == "mesh.create_primitive"  # type: ignore[index]
+    assert captured["json"]["tools"][0]["function"]["name"] == "mesh__create_primitive"  # type: ignore[index]
     assert captured["json"]["tool_choice"] == "required"  # type: ignore[index]
     assert captured["json"]["max_tokens"] == 2048  # type: ignore[index]
     assert result.parsed is not None
     assert result.parsed.tool_calls[0].name == "mesh.create_primitive"
     assert result.parsed.tool_calls[0].arguments == {"type": "cube", "name": "ProbeCube"}
+
+
+def test_chat_completions_adapter_sanitizes_control_tool_names(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_post(url, *, headers, json, timeout):
+        del url, headers, timeout
+        captured["json"] = json
+        return _http_response(
+            200,
+            {
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "task__clarify",
+                                        "arguments": '{"question":"Which material?","reason":"Missing material."}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    endpoint = EndpointConfig(
+        provider="nvidia-director",
+        family="openai",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key="test-nvidia",
+        model="qwen/qwen2.5-coder-32b-instruct",
+        transport="chat_completions",
+    )
+    request = ProviderRequest(
+        instructions="You are the director.",
+        user_input="Create a cube.",
+        tools=[
+            {
+                "type": "function",
+                "name": "task.clarify",
+                "description": "Ask for clarification.",
+                "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+            }
+        ],
+    )
+
+    result = OpenAIChatCompletionsAdapter().invoke(
+        endpoint,
+        request,
+        timeout=3.0,
+        max_retries=0,
+    )
+
+    assert captured["json"]["tools"][0]["function"]["name"] == "task__clarify"  # type: ignore[index]
+    assert result.parsed is not None
+    assert result.parsed.tool_calls[0].name == "task.clarify"
+    assert result.parsed.response_type == "clarify"
 
 
 def _context(prompt: str = "make something cool"):

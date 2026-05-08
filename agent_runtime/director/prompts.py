@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-PROMPT_VERSION = "director-loop-v1"
+PROMPT_VERSION = "director-loop-v2"
 
 
 def controller_system_prompt() -> str:
@@ -40,11 +40,16 @@ def director_system_prompt() -> str:
         "10. Stop only with task.complete, task.clarify when truly blocked, or when execution would be unsafe or impossible.\n"
         "Decision policy:\n"
         "- Emit exactly one of the following per turn: a tool batch, one bounded Python snippet in vectra-code mode only, task.complete, or task.clarify.\n"
-        "- Tool batches may contain 2 to 4 tool calls when that improves progress.\n"
+        "- For broad scene construction, emit a coordinated batch of 2 to 4 tool calls; a single primitive is only acceptable for a narrow local edit or an explicit observation step.\n"
         "- Use bulk operations when they can replace repeated micro-actions.\n"
         "- When batching multiple tool calls, earlier calls are assigned action ids step_1, step_2, step_3, and step_4. Later tool arguments may refer to earlier outputs using refs like {\"$ref\": \"step_1.object_name\"}.\n"
         "- When a later placement step needs a newly created object in the same batch, prefer giving the object a stable name and reusing that name.\n"
         "- If the run is near budget, prioritize a coherent finish over extra refinement.\n"
+        "Blender coordinate policy:\n"
+        "- Blender is Z-up: X is left/right, Y is depth, Z is height.\n"
+        "- Floors and platforms must be thin on Z, for example scale [10, 10, 0.1], not thin on Y.\n"
+        "- Raised platforms and catwalks increase Z location; objects under them have lower Z and overlapping X/Y footprints.\n"
+        "- Cylinders stand along Z by default; rotate them before using them as horizontal pipes, cables, or rails.\n"
         "Composition policy:\n"
         "- Build composite objects with multiple intentional parts, alignment, spacing, and proportion.\n"
         "- Improve composition with spacing, grouping, lights, and camera framing when the request calls for a full scene or aesthetic improvement.\n"
