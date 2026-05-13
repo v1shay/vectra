@@ -13,7 +13,7 @@ from ..agent.observation import build_scene_state as build_agent_scene_state
 from ..agent.observation import capture_viewport_screenshot
 from ..agent.reflection import summarize_scene_diff
 from ..addon_bootstrap import current_dev_source_path
-from ..bridge.client import BridgeClientError, create_agent_step, create_task
+from ..bridge.client import BridgeClientError, ai_health_check, create_agent_step, create_task
 from ..execution import ConsoleCodeExecutor, ExecutionEngine
 from ..runtime_service import ensure_local_backend, managed_backend_log_path
 from ..utils.logging import get_vectra_logger, log_structured
@@ -749,6 +749,90 @@ class VECTRA_OT_start_backend(bpy.types.Operator):
         scene.vectra_status = "Backend online"
         _report_operator(self, {"INFO"}, "Vectra backend is online")
         return {"FINISHED"}
+
+
+def _format_ai_probe_status(payload: dict[str, Any]) -> str:
+    probe = payload.get("probe", {})
+    if not isinstance(probe, dict):
+        probe = {}
+    status = str(payload.get("status", "error")).strip() or "error"
+    provider = str(probe.get("provider") or "").strip()
+    model = str(probe.get("model") or "").strip()
+    runtime_state = str(probe.get("runtime_state") or "").strip()
+    failure_reason = str(probe.get("failure_reason") or "").strip()
+    elapsed_ms = probe.get("elapsed_ms")
+    provider_label = f"{provider}:{model}" if provider and model else provider or model or "AI provider"
+    elapsed_label = f" in {elapsed_ms} ms" if isinstance(elapsed_ms, int) else ""
+    if status == "ok":
+        return f"AI online via {provider_label}{elapsed_label}"
+    if status == "unconfigured":
+        return failure_reason or "AI is not configured"
+    detail = failure_reason or runtime_state or "AI health probe failed"
+    return f"AI unavailable via {provider_label}: {detail}"
+
+
+class VECTRA_OT_test_ai(bpy.types.Operator):
+    bl_idname = "vectra.test_ai"
+    bl_label = "Test AI"
+    bl_description = "Run a short provider health probe without starting scene generation"
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        scene = context.scene
+        if getattr(scene, "vectra_request_in_flight", False):
+            _report_operator(self, {"INFO"}, "Cannot test AI while a Vectra request is running")
+            return {"CANCELLED"}
+
+        repo_root_hint = current_dev_source_path(context)
+        initial_log_path = managed_backend_log_path(repo_root_hint)
+        _set_backend_state(scene, "checking-ai", initial_log_path or "")
+        _apply_ui_state(
+            scene,
+            status="Testing AI provider...",
+            phase="sending",
+            runtime_state="ai_probe_running",
+        )
+        try:
+            ensure_local_backend(
+                base_url=DEFAULT_BASE_URL,
+                repo_root_hint=repo_root_hint,
+            )
+            payload = ai_health_check(base_url=DEFAULT_BASE_URL)
+        except BridgeClientError as exc:
+            log_path = managed_backend_log_path(repo_root_hint) or initial_log_path or ""
+            _set_backend_state(scene, "failed", log_path)
+            _apply_ui_state(
+                scene,
+                status=str(exc),
+                phase="error",
+                runtime_state="provider_transport_failure",
+            )
+            _report_operator(self, {"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:  # pragma: no cover - defensive Blender runtime guard
+            logger.exception("Unexpected Vectra AI probe failure")
+            log_path = managed_backend_log_path(repo_root_hint) or initial_log_path or ""
+            _set_backend_state(scene, "failed", log_path)
+            _apply_ui_state(
+                scene,
+                status=f"AI probe failed: {exc}",
+                phase="error",
+                runtime_state="provider_transport_failure",
+            )
+            _report_operator(self, {"ERROR"}, scene.vectra_status)
+            return {"CANCELLED"}
+
+        message = _format_ai_probe_status(payload)
+        probe = payload.get("probe", {}) if isinstance(payload.get("probe"), dict) else {}
+        runtime_state = str(probe.get("runtime_state") or ("ai_probe_succeeded" if payload.get("status") == "ok" else "provider_transport_failure"))
+        _set_backend_state(scene, "online", managed_backend_log_path(repo_root_hint) or initial_log_path or "")
+        _apply_ui_state(
+            scene,
+            status=message,
+            phase="success" if payload.get("status") == "ok" else "error",
+            runtime_state=runtime_state,
+        )
+        _report_operator(self, {"INFO"} if payload.get("status") == "ok" else {"ERROR"}, message)
+        return {"FINISHED"} if payload.get("status") == "ok" else {"CANCELLED"}
 
 
 class VECTRA_OT_run_task(bpy.types.Operator):
