@@ -17,6 +17,10 @@ DEFAULT_DIRECTOR_MODEL = "gpt-5.1"
 DEFAULT_CONTROLLER_MODEL = "grok-4.2-reasoning"
 DEFAULT_DIRECTOR_TRANSPORT = "responses"
 DEFAULT_CONTROLLER_TRANSPORT = "responses"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_NVIDIA_DIRECTOR_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,7 @@ def _read_endpoint(
     default_model: str,
     transport: str = "responses",
     transport_vars: tuple[str, ...] = (),
+    default_base_url: str = "",
 ) -> EndpointConfig | None:
     base_url = ""
     api_key = ""
@@ -118,6 +123,8 @@ def _read_endpoint(
             break
     if not model:
         model = default_model
+    if not base_url and api_key:
+        base_url = _normalize_http_url(default_base_url)
     if not (base_url and api_key):
         return None
     return EndpointConfig(
@@ -130,27 +137,54 @@ def _read_endpoint(
     )
 
 
+def _read_director_endpoint() -> EndpointConfig | None:
+    requested_provider = os.getenv("VECTRA_DIRECTOR_PROVIDER", "").strip().lower()
+    requested_family = os.getenv("VECTRA_DIRECTOR_FAMILY", "").strip().lower()
+
+    if requested_provider in {"nvidia", "nvidia-director"} or (
+        not requested_provider
+        and not os.getenv("VECTRA_DIRECTOR_API_KEY", "").strip()
+        and not os.getenv("VECTRA_LLM_API_KEY", "").strip()
+        and os.getenv("NVIDIA_API_KEY", "").strip()
+    ):
+        return _read_endpoint(
+            provider="nvidia-director",
+            family="openai",
+            base_url_vars=("VECTRA_DIRECTOR_BASE_URL", "VECTRA_LLM_BASE_URL", "NVIDIA_BASE_URL"),
+            api_key_vars=("VECTRA_DIRECTOR_API_KEY", "VECTRA_LLM_API_KEY", "NVIDIA_API_KEY"),
+            model_vars=("VECTRA_DIRECTOR_MODEL", "VECTRA_LLM_MODEL", "NVIDIA_MODEL"),
+            default_model=DEFAULT_NVIDIA_DIRECTOR_MODEL,
+            transport="chat_completions",
+            transport_vars=("VECTRA_DIRECTOR_TRANSPORT",),
+            default_base_url=DEFAULT_NVIDIA_BASE_URL,
+        )
+
+    return _read_endpoint(
+        provider=requested_provider or "openai-director",
+        family=requested_family or "openai",
+        base_url_vars=("VECTRA_DIRECTOR_BASE_URL", "VECTRA_LLM_BASE_URL", "OPENAI_BASE_URL"),
+        api_key_vars=("VECTRA_DIRECTOR_API_KEY", "VECTRA_LLM_API_KEY", "OPENAI_API_KEY"),
+        model_vars=("VECTRA_DIRECTOR_MODEL", "VECTRA_LLM_MODEL", "OPENAI_MODEL"),
+        default_model=DEFAULT_DIRECTOR_MODEL,
+        transport=DEFAULT_DIRECTOR_TRANSPORT,
+        transport_vars=("VECTRA_DIRECTOR_TRANSPORT",),
+        default_base_url=DEFAULT_OPENAI_BASE_URL,
+    )
+
+
 def load_runtime_config() -> RuntimeConfig:
     controller = _read_endpoint(
         provider="xai-controller",
         family="xai",
-        base_url_vars=("VECTRA_CONTROLLER_BASE_URL",),
-        api_key_vars=("VECTRA_CONTROLLER_API_KEY",),
-        model_vars=("VECTRA_CONTROLLER_MODEL",),
+        base_url_vars=("VECTRA_CONTROLLER_BASE_URL", "XAI_BASE_URL"),
+        api_key_vars=("VECTRA_CONTROLLER_API_KEY", "XAI_API_KEY"),
+        model_vars=("VECTRA_CONTROLLER_MODEL", "XAI_MODEL"),
         default_model=DEFAULT_CONTROLLER_MODEL,
         transport=DEFAULT_CONTROLLER_TRANSPORT,
         transport_vars=("VECTRA_CONTROLLER_TRANSPORT",),
+        default_base_url=DEFAULT_XAI_BASE_URL,
     )
-    director = _read_endpoint(
-        provider="openai-director",
-        family="openai",
-        base_url_vars=("VECTRA_DIRECTOR_BASE_URL", "VECTRA_LLM_BASE_URL"),
-        api_key_vars=("VECTRA_DIRECTOR_API_KEY", "VECTRA_LLM_API_KEY"),
-        model_vars=("VECTRA_DIRECTOR_MODEL", "VECTRA_LLM_MODEL"),
-        default_model=DEFAULT_DIRECTOR_MODEL,
-        transport=DEFAULT_DIRECTOR_TRANSPORT,
-        transport_vars=("VECTRA_DIRECTOR_TRANSPORT",),
-    )
+    director = _read_director_endpoint()
     audit_mode = _read_bool_env("VECTRA_DIRECTOR_AUDIT_MODE", False)
     disable_provider_fallback = _read_bool_env("VECTRA_DISABLE_PROVIDER_FALLBACK", audit_mode)
     return RuntimeConfig(
