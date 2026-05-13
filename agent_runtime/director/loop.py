@@ -147,6 +147,10 @@ def _tool_family(tool_name: str) -> str:
         return "camera"
     if tool_name.startswith("scene.set_frame") or tool_name.startswith("object.keyframe"):
         return "animation"
+    if tool_name.startswith("animation."):
+        return "animation"
+    if tool_name.startswith("scene.build_room_shell") or tool_name.startswith("scene.build_focal_furniture"):
+        return "structure"
     if tool_name.startswith("scene.capture") or tool_name.startswith("scene.get_state") or tool_name.startswith("scene.frame_view"):
         return "observe"
     if tool_name.startswith("python."):
@@ -440,14 +444,55 @@ def _only_coordinated_batch_pressure(issues: list[ToolCallValidationIssue]) -> b
     )
 
 
+def _only_fast_composition_fallback_pressure(issues: list[ToolCallValidationIssue]) -> bool:
+    fallback_reasons = (
+        "coordinated batch of 2 to 4 tool calls",
+        "explicitly requests animation",
+    )
+    return bool(issues) and all(any(reason in issue.reason for reason in fallback_reasons) for issue in issues)
+
+
 def _salvageable_progress_batch(
     validated_tool_calls: list[ToolCall],
     issues: list[ToolCallValidationIssue],
 ) -> list[ToolCall]:
     del validated_tool_calls
-    if _only_coordinated_batch_pressure(issues):
+    if _only_fast_composition_fallback_pressure(issues):
         return []
     return []
+
+
+def _focal_style_from_prompt(prompt: str) -> str:
+    normalized = prompt.lower()
+    if any(word in normalized for word in ("console", "desk", "workstation", "table")):
+        return "console"
+    if any(word in normalized for word in ("sculpture", "gallery", "decor", "installation")):
+        return "sculpture"
+    return "sofa"
+
+
+def _generic_scene_composition_batch(context: DirectorContext) -> list[ToolCall]:
+    if not _needs_coordinated_batch(context):
+        return []
+    style = _focal_style_from_prompt(context.user_prompt)
+    return [
+        ToolCall(
+            name="scene.build_room_shell",
+            arguments={"name": "GeneratedInterior", "width": 8.0, "depth": 6.0, "height": 3.2},
+        ),
+        ToolCall(
+            name="scene.build_focal_furniture",
+            arguments={"name": "GeneratedFocal", "style": style, "location": [0.0, -0.45, 0.0]},
+        ),
+        ToolCall(
+            name="light.create",
+            arguments={"type": "AREA", "location": [2.6, -3.4, 4.4], "energy": 1100.0},
+        ),
+        ToolCall(
+            name="animation.camera_orbit",
+            arguments={"target": "GeneratedFocal", "start_frame": 1, "end_frame": 72},
+        ),
+    ]
 
 
 def _needs_coordinated_batch(context: DirectorContext) -> bool:
@@ -472,6 +517,20 @@ def _needs_coordinated_batch(context: DirectorContext) -> bool:
         return True
     objects = context.scene_state.get("objects", [])
     return isinstance(objects, list) and len(objects) >= 3
+
+
+def _prompt_requests_animation(context: DirectorContext) -> bool:
+    prompt = context.user_prompt.strip().lower()
+    animation_keywords = (
+        "animate",
+        "animated",
+        "animation",
+        "camera move",
+        "camera orbit",
+        "orbit",
+        "keyframe",
+    )
+    return any(keyword in prompt for keyword in animation_keywords)
 
 
 def _provider_error_turn(exc: ProviderError, budget_state: BudgetState) -> DirectorTurn:
@@ -624,6 +683,13 @@ class DirectorLoop:
                         ),
                     )
                 )
+        if not issues and actionable_count > 0 and _prompt_requests_animation(context) and "animation" not in actionable_families:
+            issues.append(
+                ToolCallValidationIssue(
+                    tool_name="batch",
+                    reason="This prompt explicitly requests animation, so the batch needs at least one animation tool call.",
+                )
+            )
 
         return validated, issues
 
@@ -1013,6 +1079,31 @@ class DirectorLoop:
 
             validated_tool_calls, validation_issues = self._validate_tool_calls(tool_calls, context)
             if validation_issues:
+                if _only_fast_composition_fallback_pressure(validation_issues):
+                    fallback_tool_calls = _generic_scene_composition_batch(context)
+                    if fallback_tool_calls:
+                        fallback_validated, fallback_issues = self._validate_tool_calls(fallback_tool_calls, context)
+                        if not fallback_issues:
+                            actions, assumptions, metadata, code = self._resolve_tool_calls(fallback_validated, context)
+                            validated_actions, action_issues = self._validate_resolved_actions(actions)
+                            if not action_issues:
+                                assumptions.append(
+                                    AssumptionRecord(
+                                        key="director_fallback",
+                                        value="generic_scene_composition",
+                                        reason=(
+                                            "The provider returned a schema-valid but too-small single action for a broad prompt, "
+                                            "so Vectra used a generic non-benchmark composition batch instead of waiting for another long model retry."
+                                        ),
+                                    )
+                                )
+                                metadata["director_fallback"] = "generic_scene_composition"
+                                metadata["fallback_complete_scene"] = True
+                                metadata["replaced_provider_tool_count"] = len(tool_calls)
+                                tool_calls = fallback_validated
+                                actions = validated_actions
+                                validation_issues = []
+                                break
                 if validation_retry_used:
                     break
                 salvage_tool_calls = _salvageable_progress_batch(validated_tool_calls, validation_issues)
@@ -1333,6 +1424,7 @@ class DirectorLoop:
                 "selected_action_families": metadata.get("action_families", []),
             },
         )
+        continue_loop = not bool(metadata.get("fallback_complete_scene"))
         return DirectorTurn(
             status="ok",
             message=provider_result.assistant_text or "Prepared the next director step.",
@@ -1341,7 +1433,7 @@ class DirectorLoop:
             plan=self._plan_lines(provider_result, tool_calls),
             intended_actions=self._intended_actions(tool_calls),
             expected_outcome=provider_result.assistant_text or "The scene should move closer to the request.",
-            continue_loop=True,
+            continue_loop=continue_loop,
             assumptions=assumptions,
             tool_calls=tool_calls,
             code=code,
