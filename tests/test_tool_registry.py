@@ -73,6 +73,9 @@ def test_tool_registry_discover_loads_director_tool_surface() -> None:
     assert "object.add_modifier" in discovered_tools
     assert "scene.set_frame" in discovered_tools
     assert "object.keyframe" in discovered_tools
+    assert "animation.camera_orbit" in discovered_tools
+    assert "scene.build_room_shell" in discovered_tools
+    assert "scene.build_focal_furniture" in discovered_tools
     assert "light.adjust" in discovered_tools
     assert "camera.adjust" in discovered_tools
 

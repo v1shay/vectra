@@ -638,13 +638,18 @@ def test_custom_provider_adapter_can_be_registered_without_loop_changes(monkeypa
     assert result.runtime_state == "valid_action_batch_ready"
 
 
-def test_broad_prompt_single_action_triggers_validation_retry(monkeypatch) -> None:
+def test_broad_prompt_single_action_uses_fast_composition_fallback(monkeypatch) -> None:
     monkeypatch.setattr(
         "agent_runtime.director.loop.call_controller",
         lambda prompt, scene_state: ControllerDecision(),
     )
-    responses = [
-        ProviderResult(
+    calls = 0
+
+    def fake_call_director(prompt_text, tools, allow_complete=False):
+        nonlocal calls
+        del prompt_text, tools, allow_complete
+        calls += 1
+        return ProviderResult(
             provider="openai-director",
             model="gpt-5.1",
             parsed=ParsedProviderResponse(
@@ -653,34 +658,27 @@ def test_broad_prompt_single_action_triggers_validation_retry(monkeypatch) -> No
                 response_type="tool_calls",
             ),
             runtime_state="valid_action_batch_ready",
-        ),
-        ProviderResult(
-            provider="openai-director",
-            model="gpt-5.1",
-            parsed=ParsedProviderResponse(
-                assistant_text="I will establish the floor and the key light together.",
-                tool_calls=[
-                    ToolCall(name="mesh.create_primitive", arguments={"type": "plane", "name": "Ground"}),
-                    ToolCall(name="light.create", arguments={"type": "AREA"}),
-                ],
-                response_type="tool_calls",
-            ),
-            runtime_state="valid_action_batch_ready",
-        ),
-    ]
-    monkeypatch.setattr(
-        "agent_runtime.director.loop.call_director",
-        lambda prompt_text, tools, allow_complete=False: responses.pop(0),
-    )
+        )
+
+    monkeypatch.setattr("agent_runtime.director.loop.call_director", fake_call_director)
 
     turn = DirectorLoop().step(_context("make a coherent cinematic room"))
 
     assert turn.status == "ok"
-    assert turn.metadata["validation_retry_used"] is True
-    assert len(turn.metadata["actions"]) == 2
+    assert turn.continue_loop is False
+    assert calls == 1
+    assert turn.metadata["director_fallback"] == "generic_scene_composition"
+    assert turn.metadata["fallback_complete_scene"] is True
+    assert turn.metadata["validation_retry_used"] is False
+    assert [action["tool"] for action in turn.metadata["actions"]] == [
+        "scene.build_room_shell",
+        "scene.build_focal_furniture",
+        "light.create",
+        "animation.camera_orbit",
+    ]
 
 
-def test_broad_prompt_rejects_single_action_when_retry_provider_fails(monkeypatch) -> None:
+def test_broad_prompt_fallback_avoids_retry_provider_timeout(monkeypatch) -> None:
     monkeypatch.setattr(
         "agent_runtime.director.loop.call_controller",
         lambda prompt, scene_state: ControllerDecision(),
@@ -709,10 +707,55 @@ def test_broad_prompt_rejects_single_action_when_retry_provider_fails(monkeypatc
 
     turn = DirectorLoop().step(_context("make a coherent cinematic room"))
 
-    assert turn.status == "error"
-    assert calls == 2
-    assert turn.metadata["runtime_state"] == "provider_deadline_exceeded"
-    assert turn.error == "retry timed out"
+    assert turn.status == "ok"
+    assert turn.continue_loop is False
+    assert calls == 1
+    assert turn.metadata["director_fallback"] == "generic_scene_composition"
+    assert turn.metadata["fallback_complete_scene"] is True
+
+
+def test_animation_prompt_without_animation_uses_fast_composition_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_runtime.director.loop.call_controller",
+        lambda prompt, scene_state: ControllerDecision(),
+    )
+    calls = 0
+
+    def fake_call_director(prompt_text, tools, allow_complete=False):
+        nonlocal calls
+        del prompt_text, tools, allow_complete
+        calls += 1
+        return ProviderResult(
+            provider="nvidia-director",
+            model="nemotron",
+            transport="chat_completions",
+            parsed=ParsedProviderResponse(
+                assistant_text="I will build and frame the scene.",
+                tool_calls=[
+                    ToolCall(name="scene.build_room_shell", arguments={"name": "Room"}),
+                    ToolCall(name="scene.build_focal_furniture", arguments={"name": "Sofa", "style": "sofa"}),
+                    ToolCall(name="light.create", arguments={"type": "AREA"}),
+                    ToolCall(name="camera.ensure", arguments={"target": "Sofa"}),
+                ],
+                response_type="tool_calls",
+            ),
+            runtime_state="valid_action_batch_ready",
+        )
+
+    monkeypatch.setattr("agent_runtime.director.loop.call_director", fake_call_director)
+
+    turn = DirectorLoop().step(_context("make a coherent room with a short camera animation"))
+
+    assert turn.status == "ok"
+    assert turn.continue_loop is False
+    assert calls == 1
+    assert turn.metadata["director_fallback"] == "generic_scene_composition"
+    assert [action["tool"] for action in turn.metadata["actions"]] == [
+        "scene.build_room_shell",
+        "scene.build_focal_furniture",
+        "light.create",
+        "animation.camera_orbit",
+    ]
 
 
 def test_invalid_tool_after_retry_returns_tool_validation_failure(monkeypatch) -> None:
