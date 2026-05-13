@@ -145,7 +145,12 @@ def test_addon_runtime_register_unregister_cycle_is_reload_safe(
     runtime_module.register()
     runtime_module.register()
 
-    assert fake_bpy.utils.registered_names == {"vectra.start_backend", "vectra.run_task", "VECTRA_PT_panel"}
+    assert fake_bpy.utils.registered_names == {
+        "vectra.start_backend",
+        "vectra.test_ai",
+        "vectra.run_task",
+        "VECTRA_PT_panel",
+    }
     for attribute_name in (
         "vectra_prompt",
         "vectra_status",
@@ -303,7 +308,7 @@ def test_start_backend_operator_surfaces_actionable_start_error(
     assert "could not find a repo checkout" in scene.vectra_status
 
 
-def test_panel_draw_exposes_start_backend_button(
+def test_panel_draw_exposes_runtime_diagnostic_buttons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_bpy = _make_fake_bpy()
@@ -362,6 +367,63 @@ def test_panel_draw_exposes_start_backend_button(
     panel.draw(SimpleNamespace(scene=scene))
 
     assert ("vectra.start_backend", "Start Backend") in operators
+    assert ("vectra.test_ai", "Test AI") in operators
+
+
+def test_test_ai_operator_surfaces_probe_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bpy = _make_fake_bpy()
+    scene = fake_bpy.types.Scene()
+    scene.vectra_request_in_flight = False
+    scene.vectra_status = "Idle"
+    scene.vectra_phase = "idle"
+    scene.vectra_runtime_state = "idle"
+    scene.vectra_backend_status = "unknown"
+    scene.vectra_backend_log_path = ""
+    context = SimpleNamespace(
+        scene=scene,
+        preferences=SimpleNamespace(
+            addons={"vectra": SimpleNamespace(preferences=SimpleNamespace(dev_source_path="/tmp/vectra"))}
+        ),
+    )
+    fake_bpy.context = context
+
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    for module_name in (
+        "vectra.addon_bootstrap",
+        "vectra.operators.run_task",
+    ):
+        sys.modules.pop(module_name, None)
+    run_task_module = _reload_module("vectra.operators.run_task")
+
+    monkeypatch.setattr(run_task_module, "ensure_local_backend", lambda **kwargs: None)
+    monkeypatch.setattr(
+        run_task_module,
+        "managed_backend_log_path",
+        lambda repo_root_hint=None: "/tmp/vectra/.vectra/backend.log",
+    )
+    monkeypatch.setattr(
+        run_task_module,
+        "ai_health_check",
+        lambda **kwargs: {
+            "status": "ok",
+            "probe": {
+                "provider": "openai-director",
+                "model": "gpt-test",
+                "runtime_state": "ai_probe_succeeded",
+                "elapsed_ms": 123,
+            },
+        },
+    )
+
+    result = run_task_module.VECTRA_OT_test_ai().execute(context)
+
+    assert result == {"FINISHED"}
+    assert scene.vectra_backend_status == "online"
+    assert scene.vectra_phase == "success"
+    assert scene.vectra_runtime_state == "ai_probe_succeeded"
+    assert scene.vectra_status == "AI online via openai-director:gpt-test in 123 ms"
 
 
 def test_run_task_blocks_reload_while_worker_thread_is_active(
