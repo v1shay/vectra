@@ -62,6 +62,7 @@ class VECTRA_PT_panel(bpy.types.Panel):
         backend_col = dev_box.column()
         backend_col.enabled = not scene.vectra_request_in_flight
         backend_col.operator("vectra.start_backend", text="Start Backend")
+        backend_col.operator("vectra.test_ai", text="Test AI")
         block_reason = get_reload_block_reason()
         if block_reason:
             dev_box.label(text=f"Reload blocked: {block_reason}")

@@ -16,6 +16,23 @@ def test_health_returns_ok() -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_ai_health_reports_redacted_configuration_without_probe(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    response = client.get("/ai/health?probe=false")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "configured"
+    assert payload["configured"] is True
+    director = payload["providers"][0]
+    assert director["provider"] == "openai-director"
+    assert director["base_url"] == "https://api.openai.com/v1"
+    assert director["model"] == "gpt-test"
+    assert director["api_key_configured"] is True
+    assert "test-openai" not in str(payload)
+
+
 def test_create_task_returns_director_wrapper_response(monkeypatch) -> None:
     monkeypatch.setattr(
         runtime_main,

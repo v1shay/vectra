@@ -9,6 +9,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in plain Python test
 if bpy is not None:
     from .operators.run_task import (
         VECTRA_OT_start_backend,
+        VECTRA_OT_test_ai,
         VECTRA_OT_run_task,
         cleanup_request_state,
         get_reload_block_reason as _get_reload_block_reason,
@@ -18,6 +19,7 @@ if bpy is not None:
 
     CLASSES = (
         VECTRA_OT_start_backend,
+        VECTRA_OT_test_ai,
         VECTRA_OT_run_task,
         VECTRA_PT_panel,
     )
