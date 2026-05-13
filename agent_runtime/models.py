@@ -9,6 +9,14 @@ class HealthResponse(BaseModel):
     status: str = "ok"
 
 
+class AIHealthResponse(BaseModel):
+    status: str
+    configured: bool = False
+    providers: list[dict[str, Any]] = Field(default_factory=list)
+    settings: dict[str, Any] = Field(default_factory=dict)
+    probe: dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskCreateRequest(BaseModel):
     prompt: str
     scene_state: dict[str, Any] = Field(default_factory=dict)
