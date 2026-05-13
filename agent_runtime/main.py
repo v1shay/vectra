@@ -16,10 +16,12 @@ try:
         ActionModel,
         AgentStepRequest,
         AgentStepResponse,
+        AIHealthResponse,
         HealthResponse,
         TaskCreateRequest,
         TaskCreateResponse,
     )
+    from .director.diagnostics import run_ai_diagnostics
     from .planner import plan
     from .utils import model_to_dict
     from vectra.utils.logging import get_vectra_logger, log_structured
@@ -29,10 +31,12 @@ except ImportError:  # pragma: no cover - supports `uvicorn main:app` from agent
         ActionModel,
         AgentStepRequest,
         AgentStepResponse,
+        AIHealthResponse,
         HealthResponse,
         TaskCreateRequest,
         TaskCreateResponse,
     )
+    from director.diagnostics import run_ai_diagnostics
     from planner import plan
     from utils import model_to_dict
     from vectra.utils.logging import get_vectra_logger, log_structured
@@ -50,6 +54,13 @@ def _build_action_models(actions: list[dict[str, Any]]) -> list[ActionModel]:
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(status="ok")
+
+
+@app.get("/ai/health", response_model=AIHealthResponse)
+def ai_health(probe: bool = True, timeout_seconds: float = 5.0) -> AIHealthResponse:
+    return AIHealthResponse.model_validate(
+        run_ai_diagnostics(probe=probe, timeout_seconds=timeout_seconds)
+    )
 
 
 @app.post("/task/create", response_model=TaskCreateResponse)
