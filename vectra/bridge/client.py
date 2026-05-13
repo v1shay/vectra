@@ -104,6 +104,21 @@ def health_check(base_url: str = DEFAULT_BASE_URL, timeout: float = 2.0) -> dict
     return data
 
 
+def ai_health_check(
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = 7.0,
+    *,
+    probe: bool = True,
+    probe_timeout_seconds: float = 5.0,
+) -> dict[str, Any]:
+    probe_value = "true" if probe else "false"
+    path = f"/ai/health?probe={probe_value}&timeout_seconds={probe_timeout_seconds:.3f}"
+    data = _request_json("GET", path, base_url=base_url, timeout=timeout)
+    if data.get("status") not in {"ok", "configured", "unconfigured", "error"}:
+        raise BridgeResponseError("AI health response missing a valid status")
+    return data
+
+
 def create_task(
     payload: dict[str, Any],
     base_url: str = DEFAULT_BASE_URL,
