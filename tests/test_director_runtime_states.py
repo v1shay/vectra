@@ -25,6 +25,7 @@ from agent_runtime.director.models import (
     ProviderResult,
     ToolCall,
 )
+from agent_runtime.director.diagnostics import run_ai_diagnostics
 from agent_runtime.director.prompts import director_system_prompt
 
 
@@ -130,6 +131,24 @@ def test_http_provider_retries_retryable_500_before_success(monkeypatch) -> None
     assert result.parsed.tool_calls[0].name == "mesh.create_primitive"
     assert result.attempt.response_metadata["retry_count"] == 1
     assert [item["status_code"] for item in result.attempt.response_metadata["transport_attempts"]] == [500, 200]
+
+
+def test_ai_diagnostics_probe_uses_short_primary_provider_call(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("VECTRA_DIRECTOR_TRANSPORT", "fake-test")
+    reset_provider_adapters()
+    register_provider_adapter(FakeAdapter())
+    try:
+        payload = run_ai_diagnostics(probe=True, timeout_seconds=2.0)
+    finally:
+        reset_provider_adapters()
+        register_default_provider_adapters()
+
+    assert payload["status"] == "ok"
+    assert payload["probe"]["provider"] == "openai-director"
+    assert payload["probe"]["model"] == "gpt-test"
+    assert payload["probe"]["runtime_state"] == "ai_probe_succeeded"
 
 
 def test_http_provider_retries_share_single_timeout_budget(monkeypatch) -> None:
