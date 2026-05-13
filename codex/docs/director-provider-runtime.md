@@ -22,6 +22,8 @@ Vectra's Director runtime now separates provider transport from Director control
 ## Runtime States
 
 - `awaiting_model_response`: the addon has dispatched a request and is waiting for the backend
+- `ai_probe_running`: the Blender UI is running a short AI health probe
+- `ai_probe_succeeded`: a short AI health probe reached the configured provider
 - `provider_transport_failure`: the provider request failed before a usable parse result
 - `provider_deadline_exceeded`: the provider request chain ran out of time before yielding a usable batch
 - `tool_call_parse_failure`: the provider responded, but the tool payload was malformed
@@ -35,6 +37,7 @@ Vectra's Director runtime now separates provider transport from Director control
 - Provider adapters own request shape, HTTP transport, and raw-response parsing.
 - The Director loop owns actionability validation, tool-surface validation, reference resolution, and executable action selection.
 - The Blender addon owns local in-flight UI state and displays backend runtime-state metadata without reclassifying failures.
+- Use `/ai/health?probe=true&timeout_seconds=5` or the Blender `Test AI` button before running a long scene-generation prompt. This proves provider reachability independently of tool planning or Blender execution.
 
 ## Extension Points
 
