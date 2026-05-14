@@ -138,13 +138,8 @@ def _role_from_record(record: dict[str, Any]) -> str | None:
             return value.strip()
     name = str(record.get("name", "")).lower()
     role_markers = {
-        "hazard": "hazard_stripe",
-        "stripe": "hazard_stripe",
         "floor": "floor",
-        "catwalk": "catwalk",
-        "workstation": "workstation",
-        "cable": "cable",
-        "light": "overhead_light",
+        "light": "light",
         "camera": "camera",
     }
     for marker, role in role_markers.items():
@@ -188,27 +183,3 @@ def world_graph_from_scene_state(scene_state: dict[str, Any] | None) -> WorldGra
             if source.location[2] + 0.2 < target.location[2]:
                 relations.append(WorldRelation(source=source.id, target=target.id, relation="below"))
     return WorldGraph(nodes=nodes, relations=relations)
-
-
-def semantic_graph_for_maintenance_bay(world_graph: WorldGraph) -> SemanticGraph:
-    semantic_nodes: dict[str, SemanticNode] = {}
-    for node in world_graph.nodes.values():
-        if node.role is None:
-            continue
-        affordances = {
-            "floor": [Affordance("supports", "Supports grounded scene objects.")],
-            "catwalk": [Affordance("overhead_access", "Provides raised traversal above workstations.")],
-            "workstation": [Affordance("maintenance", "Represents a repair or control station.")],
-            "cable": [Affordance("routes_power", "Connects equipment visually.")],
-            "hazard_stripe": [Affordance("safety_marking", "Marks restricted walking edges.")],
-            "overhead_light": [Affordance("illumination", "Lights the bay.")],
-            "camera": [Affordance("framing", "Frames the corridor composition.")],
-        }.get(node.role, [])
-        semantic_nodes[node.id] = SemanticNode(
-            id=node.id,
-            label=node.name,
-            role=node.role,
-            affordances=affordances,
-            style_tags=["industrial", "maintenance_bay"],
-        )
-    return SemanticGraph(nodes=semantic_nodes)

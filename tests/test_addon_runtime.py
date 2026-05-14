@@ -604,6 +604,14 @@ def test_agent_result_passes_execution_payload_into_verification(
             "metadata": {
                 "runtime_state": "valid_action_batch_ready",
                 "runtime_state_detail": "Valid action batch ready.",
+                "planning_mode": "organic_scene_graph_v1",
+                "hardcoding_policy": "clean",
+                "prompt_obligations": ["make a room"],
+                "organic_task_graph": [{"id": "step_1", "tool": "mesh.create_primitive"}],
+                "tool_families_used": ["create"],
+                "selected_provider": "openai-director",
+                "model": "gpt-test",
+                "validation_retry_used": False,
             },
             "execution": {
                 "kind": "tool_actions",
@@ -625,6 +633,11 @@ def test_agent_result_passes_execution_payload_into_verification(
         "execution",
         "verification",
     ]
+    assert "Intent: Prepared the next director step." in scene.vectra_agent_transcript
+    assert "Planning: organic_scene_graph_v1; hardcoding policy: clean" in scene.vectra_agent_transcript
+    assert "Obligations: make a room" in scene.vectra_agent_transcript
+    assert "Task graph: mesh.create_primitive" in scene.vectra_agent_transcript
+    assert "Runtime: Valid action batch ready. (openai-director:gpt-test; validation retry: no)" in scene.vectra_agent_transcript
 
 
 def test_bootstrap_register_replaces_stale_preferences_class(
