@@ -8,10 +8,6 @@ from typing import Any
 from .base import BaseTool
 
 _TOOL_CLASS_CATALOG: dict[str, type[BaseTool]] = {}
-_RUNTIME_EXCLUDED_MODULES = {"composition_tools", "maintenance_bay_tools"}
-_RUNTIME_EXCLUDED_TOOL_PREFIXES = ("skill.build_",)
-_RUNTIME_EXCLUDED_TOOL_NAMES = {"scene.build_room_shell", "scene.build_focal_furniture"}
-
 
 class ToolRegistryError(Exception):
     """Base exception for registry errors."""
@@ -34,8 +30,6 @@ def _tool_name_from_class(tool_cls: type[BaseTool]) -> str:
 
 def register_tool(tool_cls: type[BaseTool]) -> type[BaseTool]:
     tool_name = _tool_name_from_class(tool_cls)
-    if _is_runtime_excluded_tool(tool_name):
-        return tool_cls
     existing = _TOOL_CLASS_CATALOG.get(tool_name)
     if existing is not None and existing is not tool_cls:
         if existing.__module__ == tool_cls.__module__ and existing.__name__ == tool_cls.__name__:
@@ -44,10 +38,6 @@ def register_tool(tool_cls: type[BaseTool]) -> type[BaseTool]:
         raise DuplicateToolError(f"Tool '{tool_name}' is already registered")
     _TOOL_CLASS_CATALOG[tool_name] = tool_cls
     return tool_cls
-
-
-def _is_runtime_excluded_tool(tool_name: str) -> bool:
-    return tool_name in _RUNTIME_EXCLUDED_TOOL_NAMES or tool_name.startswith(_RUNTIME_EXCLUDED_TOOL_PREFIXES)
 
 
 class ToolRegistry:
@@ -80,7 +70,7 @@ class ToolRegistry:
         package = importlib.import_module(package_name)
         for module_info in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
             short_name = module_info.name.rsplit(".", 1)[-1]
-            if short_name in {"base", "registry", "__init__"} | _RUNTIME_EXCLUDED_MODULES:
+            if short_name in {"base", "registry", "__init__"}:
                 continue
             if module_info.name in self._discovered_modules:
                 continue
@@ -92,7 +82,7 @@ class ToolRegistry:
             self._discovered_modules.add(module_info.name)
 
         for tool_name, tool_cls in _TOOL_CLASS_CATALOG.items():
-            if tool_name not in self._tools and not _is_runtime_excluded_tool(tool_name):
+            if tool_name not in self._tools:
                 self.register(tool_cls)
 
 
