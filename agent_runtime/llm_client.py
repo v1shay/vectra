@@ -77,8 +77,3 @@ def request_director_turn(*, prompt_text: str, tools: list[dict[str, Any]]) -> P
         raise LLMTimeoutError(str(exc)) from exc
     except ProviderError as exc:
         raise LLMRequestError(str(exc)) from exc
-
-
-def extract_scene_intent(prompt: str, scene_state: dict[str, Any]) -> None:
-    del prompt, scene_state
-    raise LLMClientError("The SceneIntent pipeline has been retired in favor of the Director loop.")
