@@ -69,3 +69,43 @@ def test_reasoner_surfaces_director_errors(monkeypatch) -> None:
     assert reasoning.status == "error"
     assert reasoning.error == "No provider was available."
     assert reasoning.intended_actions == []
+
+
+def test_reasoner_does_not_route_negated_maintenance_bay_prompt(monkeypatch) -> None:
+    captured_prompts: list[str] = []
+
+    def fake_director(context):
+        captured_prompts.append(context.user_prompt)
+        return DirectorTurn(
+            status="ok",
+            message="Prepared shape plan.",
+            narration="Planning the requested cube and cylinder only.",
+            understanding="The user explicitly ruled out a maintenance bay.",
+            plan=["create the requested primitive shapes"],
+            intended_actions=["mesh.create_primitive cube", "mesh.create_primitive cylinder"],
+            expected_outcome="Only the requested shapes are created.",
+            continue_loop=True,
+            metadata={
+                "actions": [
+                    {"tool": "mesh.create_primitive", "params": {"type": "cube", "name": "LeftCube"}},
+                    {"tool": "mesh.create_primitive", "params": {"type": "cylinder", "name": "RightCylinder"}},
+                ],
+                "planning_mode": "organic_scene_graph_v1",
+                "hardcoding_policy": "clean",
+            },
+        )
+
+    monkeypatch.setattr("agent_runtime.agent.reasoner._DIRECTOR_LOOP.step", fake_director)
+
+    reasoning = reason_step(
+        _context(
+            "Create exactly two primitive shapes. Do not create a room, furniture, camera orbit, or maintenance bay."
+        )
+    )
+
+    assert captured_prompts == [
+        "Create exactly two primitive shapes. Do not create a room, furniture, camera orbit, or maintenance bay."
+    ]
+    assert reasoning.metadata["planning_mode"] == "organic_scene_graph_v1"
+    assert "benchmark" not in reasoning.metadata
+    assert all(not action["tool"].startswith("skill.build_") for action in reasoning.metadata["actions"])
