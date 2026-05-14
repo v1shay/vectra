@@ -36,3 +36,11 @@ def test_template_builder_tool_modules_are_removed_from_runtime() -> None:
     assert all(not tool_name.startswith("skill.build_") for tool_name in discovered_tools)
     assert "scene.build_room_shell" not in discovered_tools
     assert "scene.build_focal_furniture" not in discovered_tools
+
+
+def test_legacy_hardcoded_intent_pipelines_are_removed() -> None:
+    assert importlib.util.find_spec("agent_runtime.intent") is None
+    assert importlib.util.find_spec("agent_runtime.action_planner") is None
+    assert importlib.util.find_spec("agent_runtime.construction") is None
+    assert importlib.util.find_spec("agent_runtime.scene_intent") is None
+    assert importlib.util.find_spec("agent_runtime.scene_pipeline") is None
