@@ -132,6 +132,61 @@ def _runtime_state_from_metadata(metadata: dict[str, Any] | None, default: str =
     return default
 
 
+def _preview_list(values: Any, *, limit: int = 3) -> str:
+    if not isinstance(values, list) or not values:
+        return "none"
+    preview = [str(value) for value in values[:limit]]
+    if len(values) > limit:
+        preview.append(f"+{len(values) - limit} more")
+    return ", ".join(preview)
+
+
+def _append_agent_step_transcript(
+    scene: bpy.types.Scene,
+    response: dict[str, Any],
+    metadata: dict[str, Any],
+    *,
+    runtime_state: str,
+    runtime_state_detail: str,
+) -> None:
+    narration = str(response.get("narration", "")).strip()
+    understanding = str(response.get("understanding", "")).strip()
+    plan = response.get("plan", [])
+    intended_actions = response.get("intended_actions", [])
+    obligations = metadata.get("prompt_obligations", [])
+    task_graph = metadata.get("organic_task_graph", [])
+    action_families = metadata.get("tool_families_used") or metadata.get("action_families", [])
+    provider = str(metadata.get("selected_provider") or metadata.get("provider") or "").strip()
+    model = str(metadata.get("model") or "").strip()
+    planning_mode = str(metadata.get("planning_mode", "")).strip()
+    hardcoding_policy = str(metadata.get("hardcoding_policy", "")).strip()
+    retry_used = metadata.get("validation_retry_used")
+
+    _append_transcript(scene, f"Intent: {understanding or narration or response.get('message', 'No interpretation provided')}")
+    if planning_mode or hardcoding_policy:
+        _append_transcript(
+            scene,
+            f"Planning: {planning_mode or 'unknown'}; hardcoding policy: {hardcoding_policy or 'unknown'}",
+        )
+    _append_transcript(scene, f"Obligations: {_preview_list(obligations)}")
+    _append_transcript(scene, f"Plan: {_preview_list(plan)}")
+    _append_transcript(scene, f"Actions: {_preview_list(intended_actions)}")
+    if isinstance(task_graph, list) and task_graph:
+        task_names = [
+            str(task.get("tool", task.get("id", "task")))
+            for task in task_graph
+            if isinstance(task, dict)
+        ]
+        _append_transcript(scene, f"Task graph: {_preview_list(task_names)}")
+    if action_families:
+        _append_transcript(scene, f"Tool families: {_preview_list(action_families)}")
+    if provider or model or runtime_state:
+        provider_label = f"{provider}:{model}" if provider and model else provider or model or "unknown provider"
+        retry_label = "yes" if retry_used else "no"
+        detail = runtime_state_detail or runtime_state or "ready"
+        _append_transcript(scene, f"Runtime: {detail} ({provider_label}; validation retry: {retry_label})")
+
+
 def _is_poll_timer_registered() -> bool:
     return bpy.app.timers.is_registered(_poll_request_result)
 
@@ -519,6 +574,15 @@ def _handle_agent_result(scene: bpy.types.Scene, response: dict[str, Any]) -> fl
         state.budget_state = dict(response_metadata.get("budget_state", {})) if isinstance(response_metadata.get("budget_state"), dict) else {}
     if narration:
         scene.vectra_status = narration
+    if isinstance(response_metadata, dict):
+        _append_agent_step_transcript(
+            scene,
+            response,
+            response_metadata,
+            runtime_state=runtime_state,
+            runtime_state_detail=runtime_state_detail,
+        )
+    elif narration:
         _append_transcript(scene, narration)
     if isinstance(assumptions, list):
         assumption_lines = [
