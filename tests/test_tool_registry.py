@@ -74,10 +74,11 @@ def test_tool_registry_discover_loads_director_tool_surface() -> None:
     assert "scene.set_frame" in discovered_tools
     assert "object.keyframe" in discovered_tools
     assert "animation.camera_orbit" in discovered_tools
-    assert "scene.build_room_shell" in discovered_tools
-    assert "scene.build_focal_furniture" in discovered_tools
     assert "light.adjust" in discovered_tools
     assert "camera.adjust" in discovered_tools
+    assert "scene.build_room_shell" not in discovered_tools
+    assert "scene.build_focal_furniture" not in discovered_tools
+    assert all(not tool_name.startswith("skill.build_") for tool_name in discovered_tools)
 
 
 def test_tool_registry_unknown_tool_lookup_raises_error() -> None:
