@@ -4,6 +4,8 @@ Purpose: catch template routing and benchmark leakage with minimal runtime cost.
 
 Run each prompt in a mode that records provider/model, action list, fallback reason, planner id, and final object names. A pass requires no `maintenance_bay_htn_v1`, no `generic_scene_composition`, no `skill.build_*`, and no `GeneratedInterior` or `GeneratedFocal` objects unless the prompt explicitly asks for those exact names.
 
+Normal runtime should report `planning_mode: organic_scene_graph_v1` and `hardcoding_policy: clean`.
+
 ## Tiny Shape Sanity
 
 ```text
@@ -32,6 +34,12 @@ Make a small lunar sample table: flat tray, three labeled sample blocks, one mag
 
 Pass signal: table/tray/sample/magnifier semantics show up. Fail if room shell or focal sofa appears.
 
+```text
+Create a maintenance bay organically using generic tools: include a floor, raised access platform, three repair stations, cable paths, warning markings, lights, and a camera view. Do not use benchmark tools, templates, or any prebuilt maintenance-bay route.
+```
+
+Pass signal: low-level/procedural tools create prompt-specific objects. Fail if `skill.build_*`, benchmark metadata, or fixed maintenance-bay object names appear.
+
 ## Anti-Keyword Checks
 
 ```text
@@ -45,6 +53,12 @@ Add cinematic lighting to the existing objects only. Do not add geometry, do not
 ```
 
 Pass signal: light-only or camera framing changes. Fail if broad-scene fallback adds shell/furniture/orbit.
+
+```text
+Create a maintenance-bay warning sign only: one flat sign panel and two support posts. Do not create a maintenance bay, catwalk, workstations, cables, floor layout, or room.
+```
+
+Pass signal: only the sign and supports are created. Fail if any maintenance-bay route, benchmark object, or broad scene appears.
 
 ## Generalization Checks
 
@@ -60,6 +74,12 @@ Create a compact kitchen counter corner with a sink basin, faucet, cutting board
 
 Pass signal: kitchen-specific objects appear. Fail if output resembles the known room-shell/focal-furniture fallback.
 
+```text
+Create a tiny observatory desk scene with a star chart, small telescope stand, notebook, and one warm desk light. Keep it grounded and readable from camera view.
+```
+
+Pass signal: generated plan reflects observatory/desk/telescope semantics without using a known room or furniture template.
+
 ## Reporting Template
 
 For each run, record:
@@ -69,7 +89,10 @@ For each run, record:
 - provider/model
 - planner id
 - fallback reason
+- planning mode
+- hardcoding policy
 - action list
 - final object names
+- transcript excerpt
 - screenshot path
 - pass/fail reason
