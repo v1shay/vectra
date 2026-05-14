@@ -19,6 +19,7 @@ from .models import (
     ToolCall,
     ToolCallValidationIssue,
 )
+from .organic import build_organic_scene_metadata
 from .providers import ProviderError, call_controller, call_director
 from .resolver import ReferenceResolver
 
@@ -1333,6 +1334,14 @@ class DirectorLoop:
                 },
             )
         metadata = dict(metadata)
+        metadata.update(
+            build_organic_scene_metadata(
+                context=context,
+                tool_calls=tool_calls,
+                actions=actions,
+                action_families=list(metadata.get("action_families", [])),
+            )
+        )
         metadata.update(
             {
                 "provider": provider_result.provider,
