@@ -638,7 +638,7 @@ def test_custom_provider_adapter_can_be_registered_without_loop_changes(monkeypa
     assert result.runtime_state == "valid_action_batch_ready"
 
 
-def test_broad_prompt_single_action_uses_fast_composition_fallback(monkeypatch) -> None:
+def test_broad_prompt_single_action_retries_then_fails_without_template_fallback(monkeypatch) -> None:
     monkeypatch.setattr(
         "agent_runtime.director.loop.call_controller",
         lambda prompt, scene_state: ControllerDecision(),
@@ -664,21 +664,18 @@ def test_broad_prompt_single_action_uses_fast_composition_fallback(monkeypatch) 
 
     turn = DirectorLoop().step(_context("make a coherent cinematic room"))
 
-    assert turn.status == "ok"
+    assert turn.status == "error"
     assert turn.continue_loop is False
-    assert calls == 1
-    assert turn.metadata["director_fallback"] == "generic_scene_composition"
-    assert turn.metadata["fallback_complete_scene"] is True
-    assert turn.metadata["validation_retry_used"] is False
-    assert [action["tool"] for action in turn.metadata["actions"]] == [
-        "scene.build_room_shell",
-        "scene.build_focal_furniture",
-        "light.create",
-        "animation.camera_orbit",
-    ]
+    assert calls == 2
+    assert turn.metadata["runtime_state"] == "tool_validation_failure"
+    assert turn.metadata["validation_retry_used"] is True
+    assert "director_fallback" not in turn.metadata
+    assert "fallback_complete_scene" not in turn.metadata
+    assert "GeneratedInterior" not in str(turn.metadata)
+    assert "GeneratedFocal" not in str(turn.metadata)
 
 
-def test_broad_prompt_fallback_avoids_retry_provider_timeout(monkeypatch) -> None:
+def test_broad_prompt_retry_provider_timeout_surfaces_error_without_template_fallback(monkeypatch) -> None:
     monkeypatch.setattr(
         "agent_runtime.director.loop.call_controller",
         lambda prompt, scene_state: ControllerDecision(),
@@ -707,14 +704,15 @@ def test_broad_prompt_fallback_avoids_retry_provider_timeout(monkeypatch) -> Non
 
     turn = DirectorLoop().step(_context("make a coherent cinematic room"))
 
-    assert turn.status == "ok"
+    assert turn.status == "error"
     assert turn.continue_loop is False
-    assert calls == 1
-    assert turn.metadata["director_fallback"] == "generic_scene_composition"
-    assert turn.metadata["fallback_complete_scene"] is True
+    assert calls == 2
+    assert turn.metadata["runtime_state"] == "provider_deadline_exceeded"
+    assert "director_fallback" not in turn.metadata
+    assert "fallback_complete_scene" not in turn.metadata
 
 
-def test_animation_prompt_without_animation_uses_fast_composition_fallback(monkeypatch) -> None:
+def test_animation_prompt_without_animation_retries_then_fails_without_template_fallback(monkeypatch) -> None:
     monkeypatch.setattr(
         "agent_runtime.director.loop.call_controller",
         lambda prompt, scene_state: ControllerDecision(),
@@ -746,16 +744,13 @@ def test_animation_prompt_without_animation_uses_fast_composition_fallback(monke
 
     turn = DirectorLoop().step(_context("make a coherent room with a short camera animation"))
 
-    assert turn.status == "ok"
+    assert turn.status == "error"
     assert turn.continue_loop is False
-    assert calls == 1
-    assert turn.metadata["director_fallback"] == "generic_scene_composition"
-    assert [action["tool"] for action in turn.metadata["actions"]] == [
-        "scene.build_room_shell",
-        "scene.build_focal_furniture",
-        "light.create",
-        "animation.camera_orbit",
-    ]
+    assert calls == 2
+    assert turn.metadata["runtime_state"] == "tool_validation_failure"
+    assert "director_fallback" not in turn.metadata
+    assert "fallback_complete_scene" not in turn.metadata
+    assert "scene.build_room_shell" in turn.error
 
 
 def test_invalid_tool_after_retry_returns_tool_validation_failure(monkeypatch) -> None:

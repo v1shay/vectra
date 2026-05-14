@@ -19,6 +19,7 @@ from .models import (
     ToolCall,
     ToolCallValidationIssue,
 )
+from .organic import build_organic_scene_metadata
 from .providers import ProviderError, call_controller, call_director
 from .resolver import ReferenceResolver
 
@@ -149,8 +150,6 @@ def _tool_family(tool_name: str) -> str:
         return "animation"
     if tool_name.startswith("animation."):
         return "animation"
-    if tool_name.startswith("scene.build_room_shell") or tool_name.startswith("scene.build_focal_furniture"):
-        return "structure"
     if tool_name.startswith("scene.capture") or tool_name.startswith("scene.get_state") or tool_name.startswith("scene.frame_view"):
         return "observe"
     if tool_name.startswith("python."):
@@ -307,6 +306,25 @@ def _history_summary(history: list[dict[str, Any]]) -> str:
     return "\n".join(snippets) if snippets else "No prior execution history."
 
 
+def _cleanup_reroute_summary(context: DirectorContext) -> str:
+    if context.execution_mode != "vectra-code":
+        return "inactive"
+    for entry in reversed(context.history[-6:]):
+        if not isinstance(entry, dict):
+            continue
+        details = entry.get("details", {})
+        if not isinstance(details, dict):
+            continue
+        if details.get("reroute") == "vectra-code-cleanup":
+            reason = str(details.get("reason", "")).strip()
+            return (
+                "active: this is a one-turn bounded cleanup/rescue pass after vectra-dev stalled. "
+                f"Reason: {reason or 'unspecified cleanup reroute.'} "
+                "Use dynamic Python only if it can safely consolidate, clean up, repair, or finish the scene better than the atomic tools."
+            )
+    return "inactive"
+
+
 def _memory_summary(memory_results: list[dict[str, Any]]) -> str:
     if not memory_results:
         return "No relevant memory."
@@ -367,6 +385,8 @@ def _build_director_prompt(
         f"User prompt:\n{context.user_prompt}\n\n"
         f"Turn budget state:\n{json.dumps({'complexity': budget_state.complexity, 'turn_budget': budget_state.turn_budget, 'turns_used': budget_state.turns_used, 'turns_remaining': budget_state.turns_remaining, 'completion_mode_active': budget_state.completion_mode_active, 'core_task_started': budget_state.core_task_started}, indent=2)}\n\n"
         f"Controller hints:\n{json.dumps(controller_hint, indent=2)}\n\n"
+        f"Execution mode: {context.execution_mode}\n"
+        f"Cleanup reroute: {_cleanup_reroute_summary(context)}\n\n"
         f"Scene state:\n{_compact_scene_state(context.scene_state)}\n\n"
         f"Latest observation:\n{_latest_observation_summary(context)}\n\n"
         f"Recent history:\n{_history_summary(context.history)}\n\n"
@@ -444,55 +464,12 @@ def _only_coordinated_batch_pressure(issues: list[ToolCallValidationIssue]) -> b
     )
 
 
-def _only_fast_composition_fallback_pressure(issues: list[ToolCallValidationIssue]) -> bool:
-    fallback_reasons = (
-        "coordinated batch of 2 to 4 tool calls",
-        "explicitly requests animation",
-    )
-    return bool(issues) and all(any(reason in issue.reason for reason in fallback_reasons) for issue in issues)
-
-
 def _salvageable_progress_batch(
     validated_tool_calls: list[ToolCall],
     issues: list[ToolCallValidationIssue],
 ) -> list[ToolCall]:
-    del validated_tool_calls
-    if _only_fast_composition_fallback_pressure(issues):
-        return []
+    del validated_tool_calls, issues
     return []
-
-
-def _focal_style_from_prompt(prompt: str) -> str:
-    normalized = prompt.lower()
-    if any(word in normalized for word in ("console", "desk", "workstation", "table")):
-        return "console"
-    if any(word in normalized for word in ("sculpture", "gallery", "decor", "installation")):
-        return "sculpture"
-    return "sofa"
-
-
-def _generic_scene_composition_batch(context: DirectorContext) -> list[ToolCall]:
-    if not _needs_coordinated_batch(context):
-        return []
-    style = _focal_style_from_prompt(context.user_prompt)
-    return [
-        ToolCall(
-            name="scene.build_room_shell",
-            arguments={"name": "GeneratedInterior", "width": 8.0, "depth": 6.0, "height": 3.2},
-        ),
-        ToolCall(
-            name="scene.build_focal_furniture",
-            arguments={"name": "GeneratedFocal", "style": style, "location": [0.0, -0.45, 0.0]},
-        ),
-        ToolCall(
-            name="light.create",
-            arguments={"type": "AREA", "location": [2.6, -3.4, 4.4], "energy": 1100.0},
-        ),
-        ToolCall(
-            name="animation.camera_orbit",
-            arguments={"target": "GeneratedFocal", "start_frame": 1, "end_frame": 72},
-        ),
-    ]
 
 
 def _needs_coordinated_batch(context: DirectorContext) -> bool:
@@ -1079,31 +1056,6 @@ class DirectorLoop:
 
             validated_tool_calls, validation_issues = self._validate_tool_calls(tool_calls, context)
             if validation_issues:
-                if _only_fast_composition_fallback_pressure(validation_issues):
-                    fallback_tool_calls = _generic_scene_composition_batch(context)
-                    if fallback_tool_calls:
-                        fallback_validated, fallback_issues = self._validate_tool_calls(fallback_tool_calls, context)
-                        if not fallback_issues:
-                            actions, assumptions, metadata, code = self._resolve_tool_calls(fallback_validated, context)
-                            validated_actions, action_issues = self._validate_resolved_actions(actions)
-                            if not action_issues:
-                                assumptions.append(
-                                    AssumptionRecord(
-                                        key="director_fallback",
-                                        value="generic_scene_composition",
-                                        reason=(
-                                            "The provider returned a schema-valid but too-small single action for a broad prompt, "
-                                            "so Vectra used a generic non-benchmark composition batch instead of waiting for another long model retry."
-                                        ),
-                                    )
-                                )
-                                metadata["director_fallback"] = "generic_scene_composition"
-                                metadata["fallback_complete_scene"] = True
-                                metadata["replaced_provider_tool_count"] = len(tool_calls)
-                                tool_calls = fallback_validated
-                                actions = validated_actions
-                                validation_issues = []
-                                break
                 if validation_retry_used:
                     break
                 salvage_tool_calls = _salvageable_progress_batch(validated_tool_calls, validation_issues)
@@ -1383,6 +1335,14 @@ class DirectorLoop:
             )
         metadata = dict(metadata)
         metadata.update(
+            build_organic_scene_metadata(
+                context=context,
+                tool_calls=tool_calls,
+                actions=actions,
+                action_families=list(metadata.get("action_families", [])),
+            )
+        )
+        metadata.update(
             {
                 "provider": provider_result.provider,
                 "model": provider_result.model,
@@ -1424,7 +1384,6 @@ class DirectorLoop:
                 "selected_action_families": metadata.get("action_families", []),
             },
         )
-        continue_loop = not bool(metadata.get("fallback_complete_scene"))
         return DirectorTurn(
             status="ok",
             message=provider_result.assistant_text or "Prepared the next director step.",
@@ -1433,7 +1392,7 @@ class DirectorLoop:
             plan=self._plan_lines(provider_result, tool_calls),
             intended_actions=self._intended_actions(tool_calls),
             expected_outcome=provider_result.assistant_text or "The scene should move closer to the request.",
-            continue_loop=continue_loop,
+            continue_loop=True,
             assumptions=assumptions,
             tool_calls=tool_calls,
             code=code,
